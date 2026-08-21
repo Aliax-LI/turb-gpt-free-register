@@ -40,6 +40,11 @@ SECRET_ENV_KEYS: dict[str, str] = {
     "SUB2API_API_KEY": "sub2api 管理接口 API Key",
     "SUB2API_API_TOKEN": "sub2api 管理接口鉴权 Token（旧配置名，兼容）",
     "SMS_API_KEY": "接码平台 API Key（如 GrizzlySMS）",
+    "VAK_API_KEY": "Vak SMS API Key",
+    "VAK_PRODUCT": "Vak SMS 固定项目代码",
+    "VAK_COUNTRY": "Vak SMS 国家别名",
+    "VAK_OPERATOR": "Vak SMS 运营商",
+    "VAK_MAX_PRICE": "Vak SMS 最高接受价格",
     "L_ADMIN_AUTH_CODE": "本地 L 接码服务 ADMIN_AUTH_CODE",
     "H_ADMIN_AUTH_CODE": "本地 H 接码服务 ADMIN_AUTH_CODE",
 }
