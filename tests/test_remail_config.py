@@ -30,7 +30,7 @@ class RemailConfigTests(unittest.TestCase):
         self.assertTrue(fields["REMAIL_API_KEY"]["secret"])
         self.assertEqual(fields["REMAIL_API_KEY"]["storage"], "env")
         self.assertEqual(fields["REMAIL_PROJECT_ID"]["type"], "int")
-        self.assertEqual(fields["REMAIL_EMAIL_SUFFIX"]["type"], "str")
+        self.assertEqual(fields["REMAIL_EMAIL_SUFFIX"]["type"], "list_str_multiline")
 
     def test_remail_promo_is_rendered_after_section_help(self):
         modern = Path("webui/templates/index.html").read_text(encoding="utf-8")

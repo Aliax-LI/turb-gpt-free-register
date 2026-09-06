@@ -1345,7 +1345,7 @@ def _finish_consent_workspace(driver) -> str:
 
 
 
-def clear_roxy_browser_auth_state(driver) -> None:
+def clear_roxy_browser_auth_state(driver, *, strict: bool = False) -> None:
     """清空当前 Roxy 浏览器里的 OpenAI/ChatGPT 登录态与缓存，用于注册后复用同一环境跑 Codex。"""
     origins = [
         "https://auth.openai.com",
@@ -1353,20 +1353,24 @@ def clear_roxy_browser_auth_state(driver) -> None:
         "https://openai.com",
         "https://platform.openai.com",
     ]
-    logger.info("[Codex][Browser] 复用注册窗口：开始清理 Cookie / localStorage / sessionStorage / cache")
+    logger.info("[Roxy清理] 开始清理浏览器数据，用途=%s", "新注册环境初始化" if strict else "Codex 授权前清理")
     try:
         driver.execute_cdp_cmd("Network.enable", {})
     except Exception:
         pass
     try:
         driver.execute_cdp_cmd("Network.clearBrowserCookies", {})
-        logger.info("[Codex][Browser] 已清理浏览器 Cookie")
+        logger.info("[Roxy清理] 已清理浏览器 Cookie")
     except Exception as exc:
+        if strict:
+            raise RuntimeError("浏览器 Cookie 清理失败，停止使用该环境") from exc
         logger.info("[Codex][Browser] 清理 Cookie 失败，继续尝试其它缓存：%s", str(exc)[:160])
     try:
         driver.execute_cdp_cmd("Network.clearBrowserCache", {})
-        logger.info("[Codex][Browser] 已清理浏览器 Cache")
+        logger.info("[Roxy清理] 已清理浏览器 Cache")
     except Exception as exc:
+        if strict:
+            raise RuntimeError("浏览器缓存清理失败，停止使用该环境") from exc
         logger.info("[Codex][Browser] 清理 Cache 失败，继续：%s", str(exc)[:160])
     for origin in origins:
         try:
@@ -1374,15 +1378,17 @@ def clear_roxy_browser_auth_state(driver) -> None:
                 "origin": origin,
                 "storageTypes": "all",
             })
-            logger.info("[Codex][Browser] 已清理站点数据：%s", origin)
+            logger.info("[Roxy清理] 已清理站点数据：%s", origin)
         except Exception as exc:
+            if strict:
+                raise RuntimeError(f"浏览器站点数据清理失败：{origin}") from exc
             logger.debug("[Codex][Browser] 清理站点数据失败 %s: %s", origin, exc)
     try:
         driver.get("about:blank")
     except Exception:
         pass
     time.sleep(1.0)
-    logger.info("[Codex][Browser] 注册窗口登录态清理完成，准备开始 Codex 授权")
+    logger.info("[Roxy清理] 浏览器数据清理完成，用途=%s", "新注册环境初始化" if strict else "Codex 授权前清理")
 
 def _run_roxy_codex_oauth_once(
     email: str,

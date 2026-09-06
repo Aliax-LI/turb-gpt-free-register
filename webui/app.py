@@ -89,6 +89,7 @@ def _compact_account_for_list(row: dict) -> dict:
     out = {
         "id": row.get("id"),
         "email": row.get("email"),
+        "exit_ip": row.get("exit_ip"),
         "has_access_token": bool(str(row.get("access_token") or "").strip()),
         "totp_enabled": bool(row.get("totp_secret")),
         "codex_agent_has_token": bool(str(row.get("codex_agent_token") or "").strip()),

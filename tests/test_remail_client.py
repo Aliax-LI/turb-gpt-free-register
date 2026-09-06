@@ -9,6 +9,20 @@ from core import remail_client
 class RemailClientTests(unittest.TestCase):
     def setUp(self):
         remail_client._CONTEXT_CACHE.clear()
+        remail_client._EMAIL_SUFFIX_DECK.clear()
+        remail_client._EMAIL_SUFFIX_CONFIG = ()
+        remail_client._LAST_EMAIL_SUFFIX = ""
+
+    def test_email_suffixes_are_not_repeated_within_a_cycle(self):
+        suffixes = ["remail.264341.xyz", "outlook.com", "icloud.com"]
+        with patch.object(email_config, "REMAIL_EMAIL_SUFFIX", suffixes, create=True):
+            picked = [remail_client._email_suffix() for _ in suffixes]
+            next_pick = remail_client._email_suffix()
+
+        self.assertCountEqual(picked, suffixes)
+        self.assertEqual(len(set(picked)), len(suffixes))
+        self.assertIn(next_pick, suffixes)
+        self.assertNotEqual(next_pick, picked[-1])
 
     @patch("core.remail_client.requests.request")
     def test_pick_account_creates_code_order_and_caches_service_token(self, request):

@@ -2,24 +2,88 @@
 """通过 RoxyBrowser 指纹浏览器 + Selenium 执行 ChatGPT 注册。"""
 from __future__ import annotations
 
+import ipaddress
+import json
 import logging
 import random
+import re
 import string
+import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 from config import roxybrowser as _cfg
 from config import twofa as _twofa_cfg
 from core.account_export import save_account_data, post_register_dwell
 from core.browser_data_saver import BrowserDataSaver
-from core.browser_traffic import SeleniumTrafficTracker
+from core.browser_traffic import SeleniumTrafficTracker, _safe_url_for_log
 from core.email_provider import acquire_email_after_input, wait_for_otp, resolve_email_source
 from core.humanize import delay as human_delay
 from core.roxybrowser_client import RoxyBrowserClient, RoxyOpenResult
 
 logger = logging.getLogger(__name__)
+
+_ROXY_EXIT_IP_CLAIMS: set[str] = set()
+_ROXY_EXIT_IP_CLAIMS_LOCK = threading.Lock()
+
+
+def _read_roxy_exit_ip(driver) -> str:
+    """通过 Roxy 浏览器读取实际公网出口，不能用宿主机 requests 替代。"""
+    from selenium.common.exceptions import WebDriverException
+
+    url = str(getattr(_cfg, "ROXY_EXIT_IP_CHECK_URL", "") or "").strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise RuntimeError("ROXY_EXIT_IP_CHECK_URL 必须是有效的 http(s) 地址")
+    errors = []
+    for endpoint in dict.fromkeys((url, "https://checkip.amazonaws.com/")):
+        host = urlparse(endpoint).hostname
+        try:
+            _safe_get(driver, endpoint, timeout=20, attempts=1, accept_hosts=(host,))
+            raw = str(driver.execute_script("return document.body ? document.body.innerText : ''; ") or "").strip()
+            browser_error = re.search(r"NET::ERR_[A-Z_0-9]+", raw, re.IGNORECASE)
+            if browser_error:
+                raise ValueError(browser_error.group())
+            try:
+                payload = json.loads(raw)
+                value = payload.get("ip", "") if isinstance(payload, dict) else payload
+            except json.JSONDecodeError:
+                value = raw
+            try:
+                return str(ipaddress.ip_address(str(value).strip()))
+            except ValueError as exc:
+                raise ValueError(f"返回无效 IP: {raw[:120]}") from exc
+        except (ValueError, RuntimeError, WebDriverException) as exc:
+            message = str(exc)
+            browser_error = re.search(r"NET::ERR_[A-Z_0-9]+", message, re.IGNORECASE)
+            detail = browser_error.group() if browser_error else message[:180]
+            errors.append(f"{host}: {detail}")
+            logger.warning("[Roxy] 出口 IP 查询失败：%s", errors[-1])
+    raise RuntimeError(
+        "出口 IP 查询全部失败；请检查代理连接、系统时间及 HTTPS 证书：" + "; ".join(errors)
+    )
+
+
+def _claim_roxy_exit_ip(exit_ip: str) -> None:
+    """同进程批量任务也只能有一个任务使用同一个出口 IP。"""
+    from core import db
+
+    with _ROXY_EXIT_IP_CLAIMS_LOCK:
+        existing = db.get_account_by_exit_ip(exit_ip)
+        if existing:
+            raise RuntimeError(f"出口 IP {exit_ip} 已注册账号 #{existing.get('id')}（{existing.get('email')}），已跳过")
+        if exit_ip in _ROXY_EXIT_IP_CLAIMS:
+            raise RuntimeError(f"出口 IP {exit_ip} 已被另一注册任务占用，已跳过")
+        _ROXY_EXIT_IP_CLAIMS.add(exit_ip)
+
+
+def _release_roxy_exit_ip(exit_ip: str | None) -> None:
+    if exit_ip:
+        with _ROXY_EXIT_IP_CLAIMS_LOCK:
+            _ROXY_EXIT_IP_CLAIMS.discard(exit_ip)
 
 
 def _enable_performance_logging(options) -> None:
@@ -830,7 +894,7 @@ def _recover_email_submit_if_stuck(driver, email: str) -> dict:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
-def _submit_email_via_browser_nextauth(driver, email: str) -> dict:
+def _submit_email_via_browser_nextauth(driver, email: str, csrf_token: str = "") -> dict:
     """在 Roxy 浏览器上下文里调用 ChatGPT NextAuth signin。
 
     UI submit 在 Roxy/Chrome 150 上会偶发只跳到 `/auth/login?email=...` 后停住。
@@ -839,28 +903,41 @@ def _submit_email_via_browser_nextauth(driver, email: str) -> dict:
     """
     try:
         current = str(getattr(driver, "current_url", "") or "")
-        if "chatgpt.com" not in current:
+        if urlparse(current).scheme != "https" or urlparse(current).netloc != "chatgpt.com":
             return {"ok": False, "reason": "not_on_chatgpt", "url": current[:180]}
     except Exception:
         current = ""
 
-    did = str(uuid.uuid4())
+    cookie = driver.get_cookie("oai-did") or {}
+    did = cookie.get("value") or str(uuid.uuid4())
+    if not cookie.get("value"):
+        driver.add_cookie({"name": "oai-did", "value": did, "domain": "chatgpt.com", "path": "/", "secure": True})
     auth_log_id = str(uuid.uuid4())
     old_script_timeout = int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90)
     try:
         try:
-            driver.set_script_timeout(25)
+            driver.set_script_timeout(30)
         except Exception:
             pass
         result = driver.execute_async_script(r"""
         const email = String(arguments[0] || '').trim();
         const did = String(arguments[1] || '');
         const authLogId = String(arguments[2] || '');
+        const suppliedCsrf = String(arguments[3] || '');
         const done = arguments[arguments.length - 1];
         (async () => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 25000);
           try {
+            if (location.origin !== 'https://chatgpt.com') {
+              done({ok:false, stage:'origin'}); return;
+            }
+            let csrfToken = suppliedCsrf;
+            if (!csrfToken) {
             const csrfResp = await fetch('/api/auth/csrf', {
               method: 'GET',
+              signal: controller.signal,
+              redirect: 'error',
               credentials: 'include',
               headers: {
                 'accept': 'application/json',
@@ -871,10 +948,11 @@ def _submit_email_via_browser_nextauth(driver, email: str) -> dict:
             const csrfText = await csrfResp.text();
             let csrfData = {};
             try { csrfData = JSON.parse(csrfText); } catch (_) {}
-            const csrfToken = csrfData.csrfToken || '';
+            csrfToken = csrfData.csrfToken || '';
             if (!csrfResp.ok || !csrfToken) {
               done({ok:false, stage:'csrf', status:csrfResp.status, body:csrfText.slice(0, 500)});
               return;
+            }
             }
 
             const q = new URLSearchParams({
@@ -883,15 +961,18 @@ def _submit_email_via_browser_nextauth(driver, email: str) -> dict:
               auth_session_logging_id: authLogId,
               'ext-passkey-client-capabilities': '11111',
               screen_hint: 'login_or_signup',
+              ccaps: 'login_methods',
               login_hint: email
             });
             const body = new URLSearchParams({
-              callbackUrl: 'https://chatgpt.com/',
+              callbackUrl: 'https://chatgpt.com/api/auth/session',
               csrfToken,
               json: 'true'
             });
             const resp = await fetch('/api/auth/signin/openai?' + q.toString(), {
               method: 'POST',
+              signal: controller.signal,
+              redirect: 'error',
               credentials: 'include',
               headers: {
                 'accept': 'application/json',
@@ -918,13 +999,18 @@ def _submit_email_via_browser_nextauth(driver, email: str) -> dict:
               if (!u.searchParams.get('auth_session_logging_id')) u.searchParams.set('auth_session_logging_id', authLogId);
               url = u.toString();
             } catch (_) {}
-            window.location.assign(url);
-            done({ok:true, stage:'redirect', url:url.slice(0, 260)});
+            const target = new URL(url);
+            if (target.protocol !== 'https:' || target.host !== 'auth.openai.com' || target.username || target.password) {
+              done({ok:false, stage:'invalid_authorize_url'}); return;
+            }
+            done({ok:true, stage:'redirect', url});
           } catch (e) {
-            done({ok:false, stage:'exception', error:String(e && (e.stack || e.message) || e).slice(0, 700)});
+            done({ok:false, stage:'exception', error:'network_or_redirect_error'});
+          } finally {
+            clearTimeout(timer);
           }
         })();
-        """, email, did, auth_log_id) or {}
+        """, email, did, auth_log_id, csrf_token) or {}
         return result if isinstance(result, dict) else {"ok": False, "reason": "invalid_result", "result": str(result)[:300]}
     except Exception as exc:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
@@ -1029,6 +1115,7 @@ def _submit_email_and_wait_next(
     """填写并提交邮箱，必须确认进入 password/otp/logged_in 才返回。"""
     last_state = None
     current_email = str(email or "").strip()
+    recovered_login = False
     for attempt in range(1, attempts + 1):
         if current_email:
             _type_email_address(driver, current_email, timeout=20)
@@ -1053,6 +1140,17 @@ def _submit_email_and_wait_next(
         _submit_email_step(driver, current_email)
         logger.info("%s 已提交邮箱，等待进入密码页或验证码页（%s/%s）", _log_prefix(driver), attempt, attempts)
         state_name = _wait_email_submit_next_state(driver, current_email, timeout=20)
+        state = _email_input_value_state(driver)
+        current = urlparse(str(state.get("url") or ""))
+        if (state_name == "unknown" and not state.get("inputs") and not recovered_login
+                and current.netloc == "chatgpt.com" and current.path == "/auth/login"):
+            recovered_login = True
+            logger.info("%s 邮箱提交后登录页没有输入框，使用同一邮箱恢复一次 HTTP 登录入口", _log_prefix(driver))
+            if not _start_roxy_hybrid(driver, lambda: current_email):
+                raise RuntimeError("邮箱提交后登录页缺失表单，HTTP 入口也未就绪；请检查页面验证或代理连接")
+            state_name = _wait_email_submit_next_state(driver, current_email, timeout=30)
+            if state_name not in ("password", "otp", "logged_in", "login_password"):
+                raise RuntimeError("登录页恢复后仍未进入认证页面，停止重复提交")
         if state_name == "login_password":
             raise RuntimeError(f"邮箱提交后进入登录密码页，按已注册/不可用邮箱处理并停用: url={getattr(driver, 'current_url', '') or 'https://auth.openai.com/log-in/password'}")
         if state_name in ("password", "otp", "logged_in"):
@@ -1284,6 +1382,7 @@ def _has_access_token(driver) -> bool:
     try:
         result = driver.execute_async_script(r"""
         const done = arguments[0];
+        if (location.origin !== 'https://chatgpt.com') { done(false); return; }
         fetch('https://chatgpt.com/api/auth/session', {credentials:'include'})
           .then(r => r.json()).then(j => done(Boolean(j && j.accessToken)))
           .catch(() => done(false));
@@ -1562,16 +1661,36 @@ def _password_page_state(driver) -> dict:
         const visible = el => !!el && !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
           && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
           && !el.disabled && !el.readOnly;
+        const secrets = [...document.querySelectorAll('input')].map(el => el.value || '').filter(Boolean);
+        const redact = value => {
+          let text = String(value || '');
+          for (const secret of secrets.sort((a,b) => b.length-a.length)) text = text.split(secret).join('<redacted>');
+          return text.replace(/[\w.+-]+@[\w.-]+/g, '<email>')
+            .replace(/\b\d{6}\b/g, '<otp>').replace(/[A-Za-z0-9_\-.]{32,}/g, '<token>').slice(0, 500);
+        };
         const inputs = [...document.querySelectorAll('input')].map(el => ({
           type: el.getAttribute('type') || '', name: el.getAttribute('name') || '', id: el.id || '',
-          autocomplete: el.getAttribute('autocomplete') || '', visible: visible(el), value: el.type === 'password' ? '<password>' : (el.value || '')
+          autocomplete: el.getAttribute('autocomplete') || '', visible: visible(el), value: '<redacted>',
+          length: (el.value || '').length, disabled: !!el.disabled, readOnly: !!el.readOnly,
+          valid: el.validity?.valid, valueMissing: el.validity?.valueMissing,
+          patternMismatch: el.validity?.patternMismatch, tooShort: el.validity?.tooShort,
+          ariaInvalid: el.getAttribute('aria-invalid') || '', validationMessage: redact(el.validationMessage)
         })).slice(0, 30);
-        const forms = [...document.querySelectorAll('form')].map(f => ({action: f.getAttribute('action') || ''}));
+        const forms = [...document.querySelectorAll('form')].map(f => {
+          const action = new URL(f.getAttribute('action') || location.href, location.href);
+          return {action: action.origin + action.pathname};
+        });
         const buttons = [...document.querySelectorAll('button,input[type="submit"]')].map(el => ({
           type: el.getAttribute('type') || '', name: el.getAttribute('name') || '', id: el.id || '',
-          disabled: !!el.disabled, visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+          disabled: !!el.disabled, visible: !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
+          ariaDisabled: el.getAttribute('aria-disabled') || '', text: redact(el.innerText || el.textContent)
         })).slice(0, 30);
-        return {url: location.href, inputs, forms, buttons};
+        const errors = [...document.querySelectorAll('.react-aria-FieldError,[slot="errorMessage"],[id$="-error"]')]
+          .filter(visible).map(el => redact((el.innerText || el.textContent || '').trim())).filter(Boolean);
+        const diagnosticErrors = [...document.querySelectorAll('[role="alert"],[aria-live="assertive"],[class*="error"]')]
+          .filter(visible).map(el => redact(el.innerText || el.textContent)).filter(Boolean);
+        return {url: location.origin + location.pathname, title: redact(document.title), readyState: document.readyState, inputs, forms, buttons,
+          errors:[...new Set(errors)], diagnosticErrors:[...new Set(diagnosticErrors)].slice(0, 12)};
         """) or {}
     except Exception as exc:
         return {"url": getattr(driver, "current_url", ""), "error": f"{type(exc).__name__}: {exc}"}
@@ -1721,16 +1840,33 @@ def _click_continue_with_password_if_present(driver) -> dict:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
-def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str | None:
+def _fill_password_page_if_present(driver, email: str, timeout: int = 25, diagnostics: Callable[[str], None] | None = None) -> str | None:
     """邮箱提交后兼容 create-account/password。返回本次设置的 OpenAI 账号密码；未遇到密码页返回 None。"""
     end = time.time() + timeout
     last = {}
+    switching_to_password = False
+    def report(stage):
+        if diagnostics:
+            try:
+                diagnostics(stage)
+            except Exception as exc:
+                logger.info("[Roxy诊断] 采集失败 stage=%s type=%s", stage, type(exc).__name__)
+
+    report("password_entry")
     while time.time() < end:
         if _is_email_verification_page(driver):
+            if switching_to_password:
+                time.sleep(0.5)
+                continue
             result = _click_continue_with_password_if_present(driver)
             if result.get("ok"):
+                switching_to_password = True
                 logger.info("%s 邮箱验证码页已点击“使用密码继续”：email=%s detail=%s", _log_prefix(driver), email, result)
                 time.sleep(0.8)
+                continue
+            if result.get("reason") != "missing_continue_with_password":
+                # DOM 在跳转时失效不代表按钮不存在；下一轮重新读取页面。
+                time.sleep(0.5)
                 continue
             logger.info("%s 已在邮箱验证码页，但未找到“使用密码继续”按钮：detail=%s", _log_prefix(driver), result)
             return None
@@ -1754,11 +1890,9 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
                     logger.info("%s 一次性验证码入口后已检测到登录态", _log_prefix(driver))
                     return None
                 time.sleep(0.5)
-            logger.info("%s 已点击一次性验证码入口，未立即检测到 OTP 页，交给后续 OTP 阶段继续处理", _log_prefix(driver))
-            return None
+            raise RuntimeError("点击一次性验证码入口后未进入验证码页")
         if is_login_password:
-            logger.info("%s 当前是登录密码页但未找到一次性验证码入口，跳过密码填写并交给 OTP 阶段：state=%s", _log_prefix(driver), last)
-            return None
+            raise RuntimeError("当前停留在登录密码页，未找到一次性验证码入口")
         password = _registration_password()
         logger.info("%s 检测到 create-account/password，准备设置密码（%s 位）：email=%s", _log_prefix(driver), len(password), email)
         result = driver.execute_script(r"""
@@ -1829,36 +1963,53 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25) -> str
         """) or {}
         if not submit_result.get("ok") or not submit_result.get("button"):
             raise RuntimeError(f"密码页找不到可点击的 Continue 按钮：{submit_result} state={_password_page_state(driver)}")
+        report("password_before_submit")
         _human_click(driver, submit_result.get("button"), label="password_submit")
+        report("password_after_submit")
         logger.info("%s 已填写并点击密码页 Continue：detail=%s", _log_prefix(driver), {k: v for k, v in submit_result.items() if k != "button"})
         # 提交密码后通常进入邮箱验证码页，最多等一段时间。
         wait_end = time.time() + 20
         retried_submit = False
+        next_report = time.monotonic() + 5
         while time.time() < wait_end:
+            last = _password_page_state(driver)
+            if diagnostics and time.monotonic() >= next_report:
+                report("password_waiting")
+                next_report = time.monotonic() + 5
             if _is_email_verification_page(driver):
                 logger.info("%s 密码提交后已进入邮箱验证码页", _log_prefix(driver))
                 return password
             if _has_access_token(driver):
                 logger.info("%s 密码提交后已检测到登录态", _log_prefix(driver))
                 return password
+            if last.get("errors") and any(
+                i.get("visible") and i.get("type") == "password" for i in last.get("inputs", [])
+            ):
+                report("password_page_error")
+                raise RuntimeError("密码提交失败，页面提示：" + "; ".join(dict.fromkeys(last["errors"])))
             if not retried_submit and time.time() > wait_end - 15 and _is_signup_password_page(driver):
                 retried_submit = True
-                logger.info("%s 密码页点击后仍未跳转，等待后重试一次 Continue/Enter", _log_prefix(driver))
+                logger.info("%s 密码页点击后仍未跳转，等待后检查密码表单并重试一次", _log_prefix(driver))
                 human_delay("form", minimum=1.2, maximum=2.2)
-                try:
-                    _click_continue(driver)
-                except Exception:
-                    try:
-                        from selenium.webdriver.common.keys import Keys
-                        driver.switch_to.active_element.send_keys(Keys.ENTER)
-                    except Exception:
-                        pass
-            if not _is_signup_password_page(driver):
-                return password
+                report("password_before_retry")
+                # 检查和点击放在同一次脚本中，避免等待期间跳到 OTP 页后误提交空验证码。
+                retry_result = driver.execute_script(r"""
+                const pass = [...document.querySelectorAll('input[type="password"]')]
+                  .find(el => el.getClientRects().length && !el.disabled && !el.readOnly);
+                const form = pass?.closest('form');
+                const submit = form?.querySelector('button[type="submit"],input[type="submit"]');
+                if (!pass?.value || !submit || !submit.getClientRects().length || submit.disabled
+                    || submit.getAttribute('aria-disabled') === 'true') return {clicked:false};
+                submit.click();
+                return {clicked:true};
+                """)
+                logger.info("%s 密码表单重试结果：%s", _log_prefix(driver), retry_result)
+                report("password_after_retry")
             time.sleep(0.5)
-        return password
-    logger.info("%s 未检测到密码页，继续后续流程 last=%s", _log_prefix(driver), last)
-    return None
+        report("password_timeout")
+        raise RuntimeError(f"密码提交后未确认进入验证码页或登录态：url={_safe_url_for_log(last.get('url', ''))}")
+    report("password_entry_timeout")
+    raise RuntimeError(f"等待密码页或验证码页超时：url={getattr(driver, 'current_url', '')}")
 
 
 def _accept_profile_consents(driver) -> int:
@@ -2025,6 +2176,13 @@ def _read_chatgpt_session_once(driver) -> dict | None:
     """当前页面必须在 chatgpt.com；读取 /api/auth/session，拿不到 token 返回 None。"""
     script = r"""
     const done = arguments[0];
+    if (location.origin !== 'https://chatgpt.com') { done({ok:false}); return; }
+    if (location.pathname === '/api/auth/session') {
+      try {
+        const data = JSON.parse(document.body?.innerText || '');
+        if (data.accessToken) { done({ok:true, data}); return; }
+      } catch (_) {}
+    }
     fetch('/api/auth/session', {credentials: 'include'})
       .then(r => r.json())
       .then(j => done({ok: true, data: j}))
@@ -2090,7 +2248,7 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
             elif time.time() >= auto_jump_end and not forced_chatgpt_open:
                 try:
                     logger.info("%s 未在 %ss 内观察到当前窗口跳转 chatgpt.com，主动打开 ChatGPT 内读取 session", _log_prefix(driver), int(auto_jump_wait or 15))
-                    _safe_get(driver, "https://chatgpt.com/", timeout=35, attempts=2, accept_hosts=("chatgpt.com",))
+                    _safe_get(driver, "https://chatgpt.com/api/auth/session", timeout=35, attempts=2, accept_hosts=("chatgpt.com",))
                     forced_chatgpt_open = True
                     time.sleep(3)
                     current = str(getattr(driver, "current_url", "") or "")
@@ -2113,12 +2271,79 @@ def _fetch_chatgpt_session(driver, timeout: int = 90, auto_jump_wait: int = 15) 
     raise RuntimeError(f"等待 /api/auth/session accessToken 超时，最后响应: {str(last_data)[:800]}")
 
 
+def _park_completed_roxy_page(driver) -> None:
+    """凭证已取回后停止页面后台流量，保留当前环境的 Cookie 供后续授权使用。"""
+    if bool(_cfg.ROXY_KEEP_BROWSER_OPEN):
+        return
+    try:
+        driver.get("about:blank")
+        logger.info("[Roxy省流量] 已切到空白页，停止已完成页面的后台加载")
+    except Exception as exc:
+        logger.warning("[Roxy省流量] 停止页面加载失败，继续保存结果：%s", type(exc).__name__)
+
+
 def _check_manual_stop() -> None:
     try:
         from core.registration_service import check_stop_requested
         check_stop_requested()
     except ImportError:
         return
+
+
+def _start_roxy_login_page(driver, email, email_supplier) -> None:
+    logger.info("[Roxy注册] 打开登录页：https://chatgpt.com/auth/login")
+    _safe_get(driver, "https://chatgpt.com/auth/login", timeout=45, attempts=2, accept_hosts=("chatgpt.com", "auth.openai.com"))
+    human_delay("navigate")
+    _page_warmup(driver, reason="login_page")
+    _maybe_accept(driver)
+    _check_manual_stop()
+    _submit_email_and_wait_next(driver, email, attempts=3, email_supplier=email_supplier)
+
+
+def _start_roxy_hybrid(driver, email_supplier: Callable[[], str]) -> bool:
+    """在同一个 Roxy 会话内请求登录接口，省去 ChatGPT 登录页资源。"""
+    _safe_get(driver, "https://chatgpt.com/api/auth/csrf", timeout=25, attempts=1, accept_hosts=("chatgpt.com",))
+    current = urlparse(str(driver.current_url or ""))
+    if current.scheme != "https" or current.netloc != "chatgpt.com":
+        raise RuntimeError("Roxy 混合入口未到达 ChatGPT HTTPS 页面")
+    raw = driver.execute_script("return document.body ? document.body.innerText : '';")
+    try:
+        payload = json.loads(raw or "")
+    except (ValueError, TypeError):
+        payload = {}
+    csrf = payload.get("csrfToken") if isinstance(payload, dict) else None
+    if not isinstance(csrf, str) or not csrf:
+        logger.info("[Roxy混合] CSRF 接口未返回令牌，转入常规浏览器登录页")
+        return False
+
+    # 确认入口可用后才领取邮箱，沿用 Roxy 的代理及 Cookie，不另建 HTTP 会话。
+    email = email_supplier()
+    result = _submit_email_via_browser_nextauth(driver, email, csrf_token=csrf)
+    if not result.get("ok"):
+        raise RuntimeError(f"Roxy 混合登录请求失败：stage={result.get('stage', 'unknown')} HTTP={result.get('status', '-')}；未自动重复提交")
+    authorize_url = result.get("url")
+    parsed = urlparse(authorize_url) if isinstance(authorize_url, str) else None
+    if not parsed or parsed.scheme != "https" or parsed.netloc != "auth.openai.com":
+        raise RuntimeError("Roxy 混合登录未返回有效的 OpenAI HTTPS 授权地址")
+    logger.info("[Roxy混合] 已通过 HTTP 登录接口取得授权地址，进入 Roxy 认证页面")
+    _safe_get(driver, authorize_url, timeout=45, attempts=1, accept_hosts=("auth.openai.com",))
+    return True
+
+
+def _prepare_roxy_registration_environment(driver, opened: RoxyOpenResult) -> None:
+    if not opened.created_by_run:
+        raise RuntimeError("注册必须使用本次新建的 Roxy 环境")
+    # 关闭新环境的启动页，避免清理后后台页面重新写入站点数据。
+    handle = driver.current_window_handle
+    for other in driver.window_handles:
+        if other != handle:
+            driver.switch_to.window(other)
+            driver.close()
+    driver.switch_to.window(handle)
+    driver.get("about:blank")
+    from core.roxy_codex_oauth import clear_roxy_browser_auth_state
+    clear_roxy_browser_auth_state(driver, strict=True)
+    logger.info("[Roxy注册] 新环境准备完成：Cookie、缓存和站点存储已清理")
 
 
 def run_roxy_registration(
@@ -2129,26 +2354,50 @@ def run_roxy_registration(
     otp_code: str = None,
     batch_dir: Path | None = None,
     on_email_acquired: Callable[[str], None] | None = None,
+    hybrid: bool = False,
 ) -> dict:
     """Roxy 指纹浏览器自动化注册入口。"""
     client = RoxyBrowserClient()
-    opened = client.open_profile()
+    opened = client.open_profile(require_fresh=True)
     driver = None
     create_acknowledged = False
     openai_password: str | None = None
     traffic_tracker: SeleniumTrafficTracker | None = None
     data_saver: BrowserDataSaver | None = None
     network_traffic: dict | None = None
+    exit_ip: str | None = None
 
-    def _traffic_checkpoint() -> None:
+    def _traffic_checkpoint(stage: str = "") -> None:
         if traffic_tracker is not None:
             try:
                 traffic_tracker.checkpoint()
+                if stage:
+                    upload = traffic_tracker.http_upload_bytes + traffic_tracker.websocket_upload_bytes
+                    download = traffic_tracker.http_download_bytes + traffic_tracker.websocket_download_bytes
+                    logger.info("[Roxy流量阶段] %s 累计上传=%.2f KiB 下载=%.2f KiB 合计=%.2f KiB", stage, upload / 1024, download / 1024, (upload + download) / 1024)
             except Exception as exc:
                 logger.debug("[Roxy注册] 刷新浏览器流量统计失败：%s", exc)
 
+    def _diagnostics(stage: str) -> None:
+        try:
+            state = _password_page_state(driver)
+            state["url"] = _safe_url_for_log(state.get("url"))
+            for form in state.get("forms", []):
+                form["action"] = _safe_url_for_log(form.get("action"))
+            if "error" in state:
+                state["error"] = "页面状态读取失败"
+            logger.info("[Roxy诊断][页面] stage=%s %s", stage, json.dumps(state, ensure_ascii=False))
+        except Exception as exc:
+            logger.info("[Roxy诊断][页面] stage=%s 采集失败 type=%s", stage, type(exc).__name__)
+        if traffic_tracker is not None:
+            try:
+                traffic_tracker.log_auth_diagnostics(stage)
+            except Exception as exc:
+                logger.info("[Roxy诊断][网络] stage=%s 采集失败 type=%s", stage, type(exc).__name__)
+
     try:
         driver = _build_driver(opened)
+        _prepare_roxy_registration_environment(driver, opened)
         try:
             traffic_tracker = SeleniumTrafficTracker(driver, label="Roxy")
         except Exception as exc:
@@ -2164,26 +2413,13 @@ def run_roxy_registration(
             driver.set_script_timeout(12)
         except Exception:
             pass
+        if bool(getattr(_cfg, "ROXY_ENFORCE_UNIQUE_EXIT_IP", True)):
+            exit_ip = _read_roxy_exit_ip(driver)
+            _claim_roxy_exit_ip(exit_ip)
+            logger.info("[Roxy注册] 本次浏览器出口 IP：%s", exit_ip)
         logger.info("[Roxy注册] 开始：%s，profile=%s", email, opened.profile_id)
 
         otp_after_ts = time.time()
-        logger.info("[Roxy注册] 打开登录页：https://chatgpt.com/auth/login")
-        _safe_get(
-            driver,
-            "https://chatgpt.com/auth/login",
-            timeout=min(45, int(getattr(_cfg, "ROXY_SELENIUM_TIMEOUT", 90) or 90)),
-            attempts=2,
-            accept_hosts=("chatgpt.com", "auth.openai.com"),
-        )
-        _traffic_checkpoint()
-        human_delay("navigate")
-        _page_warmup(driver, reason="login_page")
-        logger.info("[Roxy注册] 登录页加载完成，准备填写邮箱")
-        _maybe_accept(driver)
-        _check_manual_stop()
-
-        # 填邮箱。OpenAI UI 会随出口 IP/语言变化；这里只按 DOM 技术属性找邮箱入口，
-        # 并排除 Google/Apple/Microsoft 等第三方入口，不依赖按钮可见文字。
         def _email_supplier_after_input() -> str:
             nonlocal email
             _check_manual_stop()
@@ -2192,18 +2428,17 @@ def run_roxy_registration(
                 on_email_acquired(email)
             return email
 
-        next_state = _submit_email_and_wait_next(
-            driver,
-            email,
-            attempts=3,
-            email_supplier=_email_supplier_after_input,
-        )
-        _traffic_checkpoint()
+        hybrid_started = hybrid and _start_roxy_hybrid(driver, _email_supplier_after_input)
+        if hybrid_started:
+            logger.info("[Roxy混合] 后续密码、验证码与资料提交沿用浏览器流程")
+        else:
+            _start_roxy_login_page(driver, email, _email_supplier_after_input)
+        _traffic_checkpoint("登录入口完成")
         _check_manual_stop()
 
         # 新版注册流如果邮箱后直接进入验证码页，也优先点击“使用密码继续”进入
         # /create-account/password，设置密码并把密码写入账号 extra.registration_password。
-        openai_password = _fill_password_page_if_present(driver, email, timeout=25)
+        openai_password = _fill_password_page_if_present(driver, email, timeout=25, diagnostics=_diagnostics)
         _traffic_checkpoint()
         _check_manual_stop()
 
@@ -2282,8 +2517,9 @@ def run_roxy_registration(
         logger.info("[Roxy注册] 等待 ChatGPT 跳转并写入 session/accessToken")
         _check_manual_stop()
         session_info = _fetch_chatgpt_session(driver, timeout=120)
-        _traffic_checkpoint()
+        _traffic_checkpoint("取得session")
         access_token = session_info["accessToken"]
+        _park_completed_roxy_page(driver)
         logger.info("[Roxy注册] 已拿到 accessToken：%s", email)
         _check_manual_stop()
 
@@ -2319,8 +2555,10 @@ def run_roxy_registration(
             codex_result = {"status": "failed", "ok": False, "message": f"{type(exc).__name__}: {str(exc)[:180]}"}
 
         # 统计注册浏览器关闭前的完整会话；注册后停留期间的网络请求也计入。
+        _park_completed_roxy_page(driver)
+        _traffic_checkpoint("注册后停留前")
         post_register_dwell(email, label="Roxy注册")
-        _traffic_checkpoint()
+        _traffic_checkpoint("注册后停留后")
         if traffic_tracker is not None:
             network_traffic = traffic_tracker.stop()
         if data_saver is not None:
@@ -2331,8 +2569,11 @@ def run_roxy_registration(
             totp_secret=totp_secret,
             email_source=resolve_email_source(email),
             proxy_used=proxy or None,
+            exit_ip=exit_ip,
             batch_dir=batch_dir,
             extra={
+                "registration_driver": "roxy_hybrid" if hybrid else "roxy",
+                "hybrid_entry_used": bool(hybrid_started),
                 "user": session_info.get("user"),
                 "account": session_info.get("account"),
                 "expires": session_info.get("expires"),
@@ -2342,6 +2583,7 @@ def run_roxy_registration(
                 "network_traffic": network_traffic,
             },
         )
+        _release_roxy_exit_ip(exit_ip)
         codex_ok = codex_result.get("ok") or codex_result.get("status") == "skipped"
         return {
             "success": bool(codex_ok),
@@ -2354,6 +2596,9 @@ def run_roxy_registration(
             "error": None if codex_ok else f"Codex 未完成: {codex_result.get('message')}",
         }
     except Exception as exc:
+        _release_roxy_exit_ip(exit_ip)
+        if driver is not None:
+            _diagnostics("registration_failed")
         if traffic_tracker is not None:
             try:
                 network_traffic = traffic_tracker.stop()

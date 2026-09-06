@@ -1357,7 +1357,7 @@ def run_codex_oauth(
         oauth_driver = str(getattr(_codex_cfg, "CODEX_OAUTH_DRIVER", "protocol") or "protocol").strip().lower()
         if oauth_driver == "same_as_registration":
             oauth_driver = str(getattr(_roxy_cfg, "REGISTRATION_DRIVER", "protocol") or "protocol").strip().lower()
-        if oauth_driver in ("roxy", "roxybrowser", "fingerprint", "browser"):
+        if oauth_driver in ("roxy", "roxybrowser", "fingerprint", "browser", "roxy_hybrid"):
             from core.roxy_codex_oauth import run_roxy_codex_oauth
             return run_roxy_codex_oauth(email, otp_provider=otp_provider, proxy=proxy, force=True)
         if oauth_driver in ("browser_use", "browseruse", "browser-use", "bu"):

@@ -13,6 +13,7 @@ from config.env_loader import env_str, apply_env_overrides
 # 注册驱动：
 #   "protocol"     = 原有 curl_cffi 纯协议注册（容易封号，不建议）
 #   "roxy"         = 调用 RoxyBrowser 指纹浏览器 + Selenium 自动化注册
+#   "roxy_hybrid"  = 浏览器内 HTTP 登录入口 + Roxy 密码/验证码/资料页面
 #   "cloak"        = 调用 CloakBrowser + Playwright/Selenium 适配层注册
 #   "browser_use"  = Browser Use Cloud stealth Chromium + Playwright
 #   "skyvern"      = Skyvern Browser Sessions + Playwright
@@ -98,6 +99,10 @@ ROXY_CREATE_USE_PROXY_POOL: bool = False
 # Roxy 代理检测通道；留空则不传 checkChannel。
 ROXY_PROXY_CHECK_CHANNEL: str = "IPRust.io"
 
+# Roxy 注册前读取浏览器实际出口 IP；已成功注册过的 IP 会被拒绝，避免重复使用。
+ROXY_ENFORCE_UNIQUE_EXIT_IP: bool = True
+ROXY_EXIT_IP_CHECK_URL: str = "https://api.ipify.org?format=json"
+
 # 没有 ROXY_PROFILE_ID 时创建环境的最小 payload；按你的 Roxy 版本字段调整。
 # 默认开启 ROXY_RANDOM_PROFILE_NAME_ON_CREATE，因此这里的 name 只是兜底值。
 ROXY_PROFILE_CREATE_PAYLOAD: dict = {
@@ -110,4 +115,4 @@ ROXY_PROFILE_CREATE_PAYLOAD: dict = {
 ROXY_CODEX_CALLBACK_TIMEOUT: int = 180
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'REGISTRATION_DRIVER': 'str', 'ROXY_API_BASE': 'str', 'ROXY_API_TOKEN': 'str', 'ROXY_PROFILE_ID': 'str', 'ROXY_WORKSPACE_ID': 'str', 'ROXY_PROJECT_ID': 'str', 'ROXY_WORKSPACE_LIST_PATH': 'str', 'ROXY_OPEN_PATH': 'str', 'ROXY_OPEN_HEADLESS': 'bool', 'ROXY_CLOSE_PATH': 'str', 'ROXY_KEEP_BROWSER_OPEN': 'bool', 'ROXY_ONE_PROFILE_PER_ACCOUNT': 'bool', 'ROXY_DELETE_PROFILE_AFTER_RUN': 'bool', 'ROXY_RANDOM_OS_ON_CREATE': 'bool', 'ROXY_RANDOM_OS_CHOICES': 'str', 'ROXY_RANDOM_PROFILE_NAME_ON_CREATE': 'bool', 'ROXY_PROFILE_NAME_PREFIX': 'str', 'ROXY_CREATE_USE_PROXY_POOL': 'bool', 'ROXY_PROXY_CHECK_CHANNEL': 'str', 'ROXY_DELETE_PATH': 'str', 'ROXY_CODEX_CALLBACK_TIMEOUT': 'int'})
+apply_env_overrides(globals(), {'REGISTRATION_DRIVER': 'str', 'ROXY_API_BASE': 'str', 'ROXY_API_TOKEN': 'str', 'ROXY_PROFILE_ID': 'str', 'ROXY_WORKSPACE_ID': 'str', 'ROXY_PROJECT_ID': 'str', 'ROXY_WORKSPACE_LIST_PATH': 'str', 'ROXY_OPEN_PATH': 'str', 'ROXY_OPEN_HEADLESS': 'bool', 'ROXY_CLOSE_PATH': 'str', 'ROXY_KEEP_BROWSER_OPEN': 'bool', 'ROXY_ONE_PROFILE_PER_ACCOUNT': 'bool', 'ROXY_DELETE_PROFILE_AFTER_RUN': 'bool', 'ROXY_RANDOM_OS_ON_CREATE': 'bool', 'ROXY_RANDOM_OS_CHOICES': 'str', 'ROXY_RANDOM_PROFILE_NAME_ON_CREATE': 'bool', 'ROXY_PROFILE_NAME_PREFIX': 'str', 'ROXY_CREATE_USE_PROXY_POOL': 'bool', 'ROXY_PROXY_CHECK_CHANNEL': 'str', 'ROXY_ENFORCE_UNIQUE_EXIT_IP': 'bool', 'ROXY_EXIT_IP_CHECK_URL': 'str', 'ROXY_DELETE_PATH': 'str', 'ROXY_CODEX_CALLBACK_TIMEOUT': 'int'})

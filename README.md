@@ -1,9 +1,10 @@
 # Turb GPT Free Register
 
-ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目支持三套注册驱动：
+ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目支持以下注册驱动：
 
 - **protocol**：原纯协议注册，基于 `curl_cffi` + Sentinel/PoW。
 - **roxy**：RoxyBrowser 指纹浏览器 + Selenium 自动化注册，兼容新版页面流，例如 `create-account/password`、`about-you` 年龄/生日表单、地区本地化页面等。
+- **roxy_hybrid**：在同一个 Roxy 浏览器内用 HTTP 接口取得登录授权地址，省去 ChatGPT 登录页资源加载；密码、验证码、资料与后续授权仍走浏览器。代理、Cookie 和流量统计沿用当前环境，不新建宿主机 HTTP 会话。
 - **cloak**：CloakBrowser + Playwright 适配层自动化注册，支持免费 binary、无头模式、humanize、固定 fingerprint seed、代理 geoip。
 - **browser_use**：Browser Use Cloud stealth Chromium + Playwright（可选住宅代理，无需本机安装 Roxy）。
 - **skyvern**：Skyvern Browser Sessions 云端浏览器 + Playwright CDP。
@@ -26,11 +27,16 @@ ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目�
 - 支持注册驱动切换：
   - `REGISTRATION_DRIVER = "protocol"`
   - `REGISTRATION_DRIVER = "roxy"`
+  - `REGISTRATION_DRIVER = "roxy_hybrid"`
   - `REGISTRATION_DRIVER = "cloak"`
   - `REGISTRATION_DRIVER = "browser_use"`
   - `REGISTRATION_DRIVER = "skyvern"`
 - 支持 RoxyBrowser 一号一环境：自动创建、打开、关闭、删除 Roxy Profile。
 - 支持 Roxy 无头启动：`ROXY_OPEN_HEADLESS=True`。
+- Roxy 两种注册方式都要求新建环境，固定 `ROXY_PROFILE_ID` 必须留空；访问认证站点前清理 Cookie、缓存及站点存储，清理失败则停止。附加启动参数不能覆盖本次环境 ID。
+- WebUI「配置 → 注册方式」选择「半协议 + Roxy（省流量）」并保存、重启即可启用混合入口；默认驱动不变。CSRF 入口未就绪时回退页面登录；登录 POST 结果不明时停止，避免重复提交。实际节省量需用任务流量统计对比，Codex 授权仍会消耗浏览器流量。
+- 混合入口的登录完成落点为 `/api/auth/session`，避免主动加载 ChatGPT 首页。取得凭证后切到空白页再执行后续等待；`ROXY_KEEP_BROWSER_OPEN=True` 调试模式会保留页面。日志 `[Roxy流量阶段]` 记录入口、取得 session、停留前后的累计流量，便于比较实际节省量。
+- 邮箱提交后若退回无输入框的登录页，使用原邮箱恢复一次 HTTP 登录入口；失败后停止，不重复购买邮箱。环境隔离仅防止会话串用，不保证注册成功或免于平台验证。
 - 支持 CloakBrowser：免费 binary、无头模式、humanize、固定 fingerprint seed、按出口 IP 自动匹配语言/时区/WebRTC。
 - Roxy / Cloak 浏览器注册已兼容：
   - 填邮箱后直接进入邮箱验证码页；
@@ -352,7 +358,7 @@ Remail API 文档：[https://remail.aishop6.com/docs](https://remail.aishop6.com
 
 - `REMAIL_API_KEY`：Remail 控制台生成的 `rk-` 开头 API Key；
 - `REMAIL_PROJECT_ID`：Remail「项目」列表中用于 ChatGPT/OpenAI 验证码的 `projectId`；
-- `REMAIL_EMAIL_SUFFIX`：下单后缀，微软邮箱通常填 `outlook.com`。
+- `REMAIL_EMAIL_SUFFIX`：下单后缀列表；WebUI 每行一个，随机使用且一轮内不重复。
 
 然后设置：
 
@@ -362,7 +368,7 @@ EMAIL_SOURCE=remail
 REMAIL_API_BASE=https://remail.aishop6.com
 REMAIL_API_KEY=你的_Remail_API_Key
 REMAIL_PROJECT_ID=项目ID
-REMAIL_EMAIL_SUFFIX=outlook.com
+REMAIL_EMAIL_SUFFIX=["remail.264341.xyz","outlook.com","icloud.com","hotmail.com","remail.343426.xyz"]
 REMAIL_SERVICE_MODE=purchase
 REMAIL_SUPPLY_POLICY=public_only
 ```
@@ -716,6 +722,7 @@ REGISTER_PASSWORD = "你的固定密码"
 | `config/twofa.py` | 2FA 开关 |
 | `config/humanize.py` | 随机停顿/人工节奏 |
 | `config/flow_trigger.py` | 注册成功后触发 Flow |
+| `config/chatgpt2api.py` | 注册成功后同步 access token 到 ChatGPT2API |
 | `config/browser.py` | 协议模式浏览器指纹 |
 | `config/openai_protocol.py` | OpenAI OAuth/Sentinel 参数 |
 

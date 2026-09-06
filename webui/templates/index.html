@@ -3581,7 +3581,7 @@ function renderAccounts() {
       <td class="col-id">#${esc(r.id)}</td>
       <td class="col-email" title="${esc(r.email || '')}">
         <div class="acc-v2-email">${esc(r.email)}${r.archived ? ' <span class="pill status-used" title="该账号已归档">归档</span>' : ''}</div>
-        <div class="acc-v2-sub">${esc(r.user_name || '-')}</div>
+        <div class="acc-v2-sub">${esc(r.user_name || '-')}${r.exit_ip ? ` · 出口 IP: ${esc(r.exit_ip)}` : ''}</div>
       </td>
       <td class="col-source">${esc(r.email_source || '-')}</td>
       <td class="col-token">${_tokenCellV2(r)}</td>
@@ -5902,6 +5902,7 @@ function getConfigGroupNames() {
 function configSectionIntro(name) {
   if (name === '网站配置') return '配置网站登录授权码与 Session 签名密钥。';
   if (name === '功能开关') return '';
+  if (name === 'ChatGPT2API') return '注册成功账号的 access token 自动同步设置。';
   if (name === '注册方式') return '选择账号注册时使用的自动化方式。';
   if (name === 'CloakBrowser') return '本地指纹浏览器运行参数、语言时区与代理设置。';
   if (name === 'Browser Use') return 'Browser Use Cloud 远端浏览器与代理参数。';
@@ -5935,6 +5936,12 @@ function configFeatureIcon(key) {
       svg: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>'
     };
   }
+  if (key === 'ENABLE_CHATGPT2API_SYNC') {
+    return {
+      cls: 'config-switch-v2-icon--flow',
+      svg: '<path d="M20 7h-9a4 4 0 0 0-4 4v1"/><path d="m17 4 3 3-3 3"/><path d="M4 17h9a4 4 0 0 0 4-4v-1"/><path d="m7 20-3-3 3-3"/>'
+    };
+  }
   return {
     cls: 'config-switch-v2-icon--default',
     svg: '<path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/>'
@@ -5958,6 +5965,7 @@ function registrationDriverChoices() {
   return [
     { value: 'protocol', label: '纯协议注册' },
     { value: 'roxy', label: 'RoxyBrowser' },
+    { value: 'roxy_hybrid', label: '半协议 + Roxy（省流量）' },
     { value: 'cloak', label: '本地指纹浏览器' },
     { value: 'browser_use', label: 'browser_use' },
     { value: 'skyvern', label: 'skyvern' },
@@ -6387,7 +6395,7 @@ function renderConfigSectionV2(name, fields) {
     `;
   }
   if (name === '功能开关') {
-    const preferred = ['ENABLE_CODEX_AUTO', 'ENABLE_2FA', 'ENABLE_FLOW_TRIGGER'];
+    const preferred = ['ENABLE_CODEX_AUTO', 'ENABLE_2FA', 'ENABLE_FLOW_TRIGGER', 'ENABLE_CHATGPT2API_SYNC'];
     const ordered = preferred
       .map(k => fields.find(f => f.key === k))
       .filter(Boolean)

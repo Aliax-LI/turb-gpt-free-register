@@ -49,7 +49,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "REGISTRATION_DRIVER", "file": "roxybrowser.py", "type": "str", "group": "注册方式",
-        "label": "注册驱动", "help": "默认推荐 roxy；protocol=纯协议，容易封号不建议；roxy=RoxyBrowser；cloak=CloakBrowser；browser_use=Browser Use Cloud+Playwright；skyvern=Skyvern Browser Sessions+Playwright",
+        "label": "注册驱动", "help": "roxy=RoxyBrowser；roxy_hybrid=HTTP 登录入口+Roxy 认证页面，省去登录页资源；protocol=纯协议；cloak=CloakBrowser；browser_use=Browser Use Cloud；skyvern=Skyvern Browser Sessions",
     },
     {
         "key": "AUTO_PLAN_CHECK_AFTER_REGISTER", "file": "register.py", "type": "bool", "group": "注册方式",
@@ -265,6 +265,14 @@ EDITABLE_FIELDS = [
         "label": "代理检测通道", "help": "写入 Roxy proxyInfo.checkChannel；留空则不传，默认 IPRust.io",
     },
     {
+        "key": "ROXY_ENFORCE_UNIQUE_EXIT_IP", "file": "roxybrowser.py", "type": "bool", "group": "RoxyBrowser",
+        "label": "禁止重复出口 IP 注册", "help": "Roxy 注册前检测浏览器实际出口 IP；已成功注册过或被并发任务占用时跳过",
+    },
+    {
+        "key": "ROXY_EXIT_IP_CHECK_URL", "file": "roxybrowser.py", "type": "str", "group": "RoxyBrowser",
+        "label": "出口 IP 查询地址", "help": "默认 api.ipify.org；必须返回 {\"ip\":\"x.x.x.x\"} 或纯 IP 文本",
+    },
+    {
         "key": "ROXY_DELETE_PATH", "file": "roxybrowser.py", "type": "str", "group": "RoxyBrowser",
         "label": "删除接口路径", "help": "默认 /browser/delete；如 Roxy 版本不同可调整",
     },
@@ -283,6 +291,23 @@ EDITABLE_FIELDS = [
     {
         "key": "ENABLE_FLOW_TRIGGER", "file": "flow_trigger.py", "type": "bool", "group": "功能开关",
         "label": "启用 Flow 触发", "help": "注册成功后自动调用内部 Flow 接口（不影响注册结果）",
+    },
+    {
+        "key": "ENABLE_CHATGPT2API_SYNC", "file": "chatgpt2api.py", "type": "bool", "group": "功能开关",
+        "label": "启用 ChatGPT2API 同步", "help": "注册成功并保存账号后，将 access token 同步到 ChatGPT2API（失败不影响注册结果）",
+    },
+    # ---- ChatGPT2API ----
+    {
+        "key": "CHATGPT2API_ACCOUNTS_URL", "file": "chatgpt2api.py", "type": "str", "group": "ChatGPT2API",
+        "label": "账号导入接口", "help": "默认 /api/accounts；每个注册成功账号会以 tokens 数组提交",
+    },
+    {
+        "key": "CHATGPT2API_BEARER", "file": "chatgpt2api.py", "type": "str", "group": "ChatGPT2API",
+        "label": "Bearer Token", "help": "ChatGPT2API 管理端鉴权 Token；仅保存到 .env", "storage": "env", "secret": True,
+    },
+    {
+        "key": "CHATGPT2API_TIMEOUT", "file": "chatgpt2api.py", "type": "int", "group": "ChatGPT2API",
+        "label": "同步超时", "help": "请求 ChatGPT2API 的最长等待秒数",
     },
     {
         "key": "ENABLE_HUMANIZE_DELAY", "file": "humanize.py", "type": "bool", "group": "人工节奏",
@@ -454,8 +479,8 @@ EDITABLE_FIELDS = [
         "label": "Remail 项目 ID", "help": "Remail API 项目列表中的 projectId，用于匹配 ChatGPT/OpenAI 验证码项目",
     },
     {
-        "key": "REMAIL_EMAIL_SUFFIX", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
-        "label": "Remail 邮箱后缀", "help": "下单时使用的邮箱后缀，默认 outlook.com；不要填写完整邮箱",
+        "key": "REMAIL_EMAIL_SUFFIX", "file": "email.py", "type": "list_str_multiline", "group": "邮箱 / OTP",
+        "label": "Remail 邮箱后缀列表", "help": "每行一个域名；注册时随机选择，一轮内不重复",
     },
     {
         "key": "REMAIL_SERVICE_MODE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",

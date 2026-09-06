@@ -488,12 +488,12 @@ class RoxyBrowserClient:
             return ""
         return text
 
-    def open_profile(self, profile_id: str | None = None) -> RoxyOpenResult:
+    def open_profile(self, profile_id: str | None = None, *, require_fresh: bool = False) -> RoxyOpenResult:
         one_profile = bool(getattr(_cfg, "ROXY_ONE_PROFILE_PER_ACCOUNT", True))
         configured_pid = self._normalize_profile_id(profile_id if profile_id is not None else getattr(_cfg, "ROXY_PROFILE_ID", ""))
-        if one_profile and configured_pid:
+        if (one_profile or require_fresh) and configured_pid:
             raise RuntimeError(
-                "已启用 ROXY_ONE_PROFILE_PER_ACCOUNT=True（一号一环境），"
+                "当前操作要求一号一环境，"
                 "不能配置/传入固定 ROXY_PROFILE_ID；请留空以便每个账号创建新环境。"
             )
 
@@ -504,11 +504,21 @@ class RoxyBrowserClient:
             created_by_run = True
             logger.info("[Roxy] 已创建临时环境：%s", pid)
 
+        try:
+            return self._open_existing_profile(pid, created_by_run)
+        except Exception:
+            if created_by_run:
+                self.close_profile(pid)
+                self.delete_profile(pid)
+            raise
+
+    def _open_existing_profile(self, pid: str, created_by_run: bool) -> RoxyOpenResult:
         path = str(_cfg.ROXY_OPEN_PATH).format(profile_id=pid)
         params = dict(getattr(_cfg, "ROXY_OPEN_EXTRA_PARAMS", {}) or {})
         # Roxy 官方 /browser/open body: {workspaceId, dirId, args, forceOpen, headless}
         params.setdefault("workspaceId", _workspace_id_value())
-        params.setdefault("dirId", int(pid) if str(pid).isdigit() else pid)
+        # 不能让 extra 参数把新创建的环境替换为其它账号的旧环境。
+        params["dirId"] = int(pid) if str(pid).isdigit() else pid
         params.setdefault("args", [])
         params.setdefault("forceOpen", True)
         _apply_data_saver_open_args(params)

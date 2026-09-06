@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -56,6 +57,9 @@ class RemailAccount:
 
 _CONTEXT_CACHE: dict[str, RemailAccount] = {}
 _CONTEXT_LOCK = threading.RLock()
+_EMAIL_SUFFIX_DECK: list[str] = []
+_EMAIL_SUFFIX_CONFIG: tuple[str, ...] = ()
+_LAST_EMAIL_SUFFIX = ""
 
 
 def _cache_key(email: str) -> str:
@@ -202,10 +206,31 @@ def _project_id() -> int:
 
 
 def _email_suffix() -> str:
-    suffix = str(getattr(_email_cfg, "REMAIL_EMAIL_SUFFIX", "outlook.com") or "").strip().lstrip("@")
-    if not suffix or "@" in suffix or any(ch.isspace() for ch in suffix):
-        raise RemailError("Remail 邮箱后缀无效，请填写 outlook.com 等域名（不要填写完整邮箱）")
-    return suffix
+    global _EMAIL_SUFFIX_CONFIG, _EMAIL_SUFFIX_DECK, _LAST_EMAIL_SUFFIX
+
+    raw = getattr(_email_cfg, "REMAIL_EMAIL_SUFFIX", ["outlook.com"])
+    values = raw if isinstance(raw, (list, tuple)) else re.split(r"[,;\n]+", str(raw or ""))
+    suffixes = []
+    for value in values:
+        suffix = str(value).strip().lstrip("@").lower()
+        if not suffix or "@" in suffix or any(ch.isspace() for ch in suffix):
+            raise RemailError("Remail 邮箱后缀无效，请每行填写一个域名（不要填写完整邮箱）")
+        if suffix not in suffixes:
+            suffixes.append(suffix)
+
+    if not suffixes:
+        raise RemailError("Remail 邮箱后缀未配置，请至少填写一个域名")
+
+    configured = tuple(suffixes)
+    with _CONTEXT_LOCK:
+        if configured != _EMAIL_SUFFIX_CONFIG or not _EMAIL_SUFFIX_DECK:
+            _EMAIL_SUFFIX_CONFIG = configured
+            _EMAIL_SUFFIX_DECK = list(configured)
+            random.shuffle(_EMAIL_SUFFIX_DECK)
+            if len(_EMAIL_SUFFIX_DECK) > 1 and _EMAIL_SUFFIX_DECK[-1] == _LAST_EMAIL_SUFFIX:
+                _EMAIL_SUFFIX_DECK[0], _EMAIL_SUFFIX_DECK[-1] = _EMAIL_SUFFIX_DECK[-1], _EMAIL_SUFFIX_DECK[0]
+        _LAST_EMAIL_SUFFIX = _EMAIL_SUFFIX_DECK.pop()
+        return _LAST_EMAIL_SUFFIX
 
 
 def _supply_policy() -> str:
@@ -269,7 +294,7 @@ def _context_from_order(order: dict, target_email: str) -> RemailAccount | None:
     suffix = str(
         _first_value(order, "emailSuffix", "email_suffix")
         or email.rsplit("@", 1)[-1]
-        or getattr(_email_cfg, "REMAIL_EMAIL_SUFFIX", "outlook.com")
+        or "outlook.com"
     ).strip().lstrip("@")
     return RemailAccount(
         email=email,

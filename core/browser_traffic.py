@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from collections import defaultdict
@@ -1478,6 +1479,9 @@ class SeleniumTrafficTracker(_TrafficAccumulator):
                 except Exception:
                     pass
             if record is not None:
+                record["network_error"] = params.get("errorText")
+                record["blocked_reason"] = params.get("blockedReason")
+                record["canceled"] = bool(params.get("canceled"))
                 if blocked_by_data_saver:
                     record["finished"] = True
                     record["blocked_by_data_saver"] = True
@@ -1690,6 +1694,51 @@ class SeleniumTrafficTracker(_TrafficAccumulator):
                 cache_status="miss" if raw_transfer else "unknown",
                 detail_key=f"timing:{key}",
             )
+
+    def log_auth_diagnostics(self, stage: str) -> None:
+        """复用流量事件，不另行消费 performance log；只输出认证请求的脱敏摘要。"""
+        self.checkpoint()
+        records = []
+        for record in self._requests.values():
+            request = record.get("request") or {}
+            parsed = urlsplit(str(request.get("url") or ""))
+            if parsed.hostname not in {"auth.openai.com", "chatgpt.com"}:
+                continue
+            if not parsed.path.startswith(("/api/accounts/", "/api/auth/", "/create-account/", "/email-verification")):
+                continue
+            records.append(record)
+        logger.info("[%s][认证网络] stage=%s 可读=%s 匹配请求=%s（最多显示最近15条）", self.label, stage, self._log_supported, len(records))
+        for record in records[-15:]:
+            request = record.get("request") or {}
+            response = record.get("response") or {}
+            # 浏览器错误通常为 net::ERR_*；不把可能含地址/凭证的原始错误全文写入日志。
+            error = re.search(r"(?:net::)?ERR_[A-Z0-9_]+", str(record.get("network_error") or ""), re.I)
+            detail = {
+                "id": record.get("request_id"), "method": request.get("method"),
+                "url": _safe_url_for_log(request.get("url")), "status": response.get("status"),
+                "finished": bool(record.get("finished")), "failed": bool(record.get("failed")),
+                "network_error": error.group() if error else ("other" if record.get("network_error") else None),
+                "blocked": bool(record.get("blocked_by_data_saver")),
+                "blocked_reason": record.get("blocked_reason"), "canceled": bool(record.get("canceled")),
+            }
+            # 仅提取小型 JSON 错误响应的机器错误码；绝不记录响应正文、Header 或请求体。
+            if (record.get("finished") and not record.get("failed") and _non_negative_int(response.get("status")) >= 400
+                    and "json" in str(response.get("mimeType") or "") and "error_code" not in record):
+                record["error_code"] = None
+                if _non_negative_int(response.get("encodedDataLength")) <= 16384:
+                    try:
+                        payload = self.driver.execute_cdp_cmd("Network.getResponseBody", {"requestId": record["request_id"]})
+                        body = payload.get("body") or ""
+                        if not payload.get("base64Encoded") and len(body) <= 16384:
+                            data = json.loads(body)
+                            error_data = data.get("error") if isinstance(data, dict) else None
+                            code = error_data.get("code") if isinstance(error_data, dict) else None
+                            if isinstance(code, str) and re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_.-]{0,79}", code):
+                                record["error_code"] = code
+                    except Exception:
+                        pass
+            detail["error_code"] = record.get("error_code")
+            logger.info("[%s][认证网络] stage=%s %s", self.label, stage, json.dumps(detail, ensure_ascii=False))
 
     def checkpoint(self) -> None:
         if not self._stopped:

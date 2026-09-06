@@ -38,6 +38,7 @@ SECRET_ENV_KEYS: dict[str, str] = {
     "REMAIL_API_KEY": "Remail 开放 API Key",
     "CPA_MANAGEMENT_KEY": "CPA 管理接口密钥",
     "EXTRACT_LINK_CDK": "提链服务 CDK",
+    "CHATGPT2API_BEARER": "ChatGPT2API 管理端 Bearer Token",
     "SUB2API_API_KEY": "sub2api 管理接口 API Key",
     "SUB2API_API_TOKEN": "sub2api 管理接口鉴权 Token（旧配置名，兼容）",
     "SMS_API_KEY": "接码平台 API Key（如 GrizzlySMS）",

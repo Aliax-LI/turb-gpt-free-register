@@ -454,6 +454,7 @@ def save_account_data(
     output_path: Path | None = None,  # 兼容老接口，已废弃
     email_source: str | None = None,
     proxy_used: str | None = None,
+    exit_ip: str | None = None,
     batch_dir: Path | None = None,
     auto_plan_check: bool | None = None,
 ) -> int:
@@ -502,6 +503,7 @@ def save_account_data(
         plan_type=account.get("planType"),
         expires_at=extra.get("expires"),
         proxy_used=proxy_used,
+        exit_ip=exit_ip,
         email_source=email_source,
         extra=extra,
         codex_status=codex_status,
@@ -518,6 +520,23 @@ def save_account_data(
         batch_dir=batch_dir,
     )
     logger.info("[Save] 账号及凭证已保存到 SQLite, id=%s, email=%s", row_id, email)
+
+    try:
+        from core.chatgpt2api_sync import sync_account
+
+        sync_result = sync_account(access_token)
+        if sync_result.get("ok"):
+            logger.info("[ChatGPT2API] 已同步：id=%s, email=%s", row_id, email)
+        elif sync_result.get("status") == "failed":
+            logger.warning(
+                "[ChatGPT2API] 同步失败（不影响注册结果）：id=%s, email=%s, HTTP=%s, %s",
+                row_id, email, sync_result.get("http_status") or "无", sync_result.get("message"),
+            )
+    except Exception as exc:
+        logger.warning(
+            "[ChatGPT2API] 同步异常（不影响注册结果）：id=%s, email=%s, %s: %s",
+            row_id, email, type(exc).__name__, str(exc)[:180],
+        )
 
     auto_twofa = False
     try:

@@ -904,6 +904,7 @@ def insert_account(
     expires_at: str | None = None,
     device_id: str | None = None,
     proxy_used: str | None = None,
+    exit_ip: str | None = None,
     email_source: str | None = None,
     extra: dict | None = None,
     codex_status: str | None = None,   # success / failed / skipped / missing
@@ -937,6 +938,7 @@ def insert_account(
             "plan_type": plan_type if plan_type is not None else row.get("plan_type"),
             "expires_at": expires_at if expires_at is not None else row.get("expires_at"),
             "proxy_used": proxy_used if proxy_used is not None else row.get("proxy_used"),
+            "exit_ip": exit_ip if exit_ip is not None else row.get("exit_ip"),
             "email_source": email_source if email_source is not None else row.get("email_source"),
             "extra_json": extra_json if extra_json is not None else row.get("extra_json"),
             "codex_status": codex_status if codex_status is not None else row.get("codex_status"),
@@ -1663,6 +1665,16 @@ def get_account(acc_id: int) -> dict | None:
 def get_account_by_email(email: str) -> dict | None:
     with _LOCK:
         row = _find_by_email(_load_accounts(), email)
+        return _decorate_account(row) if row else None
+
+
+def get_account_by_exit_ip(exit_ip: str) -> dict | None:
+    """按已记录的注册出口 IP 查账号；包含已归档账号。"""
+    target = str(exit_ip or "").strip()
+    if not target:
+        return None
+    with _LOCK:
+        row = next((item for item in _load_accounts() if str(item.get("exit_ip") or "").strip() == target), None)
         return _decorate_account(row) if row else None
 
 
