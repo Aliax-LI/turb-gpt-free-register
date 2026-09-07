@@ -559,6 +559,14 @@ EDITABLE_FIELDS = [
         ],
     },
     {
+        "key": "PROXY_STICKY_SESSION_PER_TASK", "file": "proxy.py", "type": "bool", "group": "代理池",
+        "label": "每任务独立粘性会话", "help": "开启后，创建 Roxy 注册环境时为代理用户名生成新的 Lsid，避免多个任务共享出口 IP；需要代理地址支持 Lsid 参数",
+    },
+    {
+        "key": "PROXY_STICKY_SESSION_TTL", "file": "proxy.py", "type": "int", "group": "代理池",
+        "label": "粘性会话时长(秒)", "help": "写入代理用户名 TTL 参数，默认 300 秒（5 分钟）；实际最长时长以代理供应商套餐为准",
+    },
+    {
         "key": "PLAN_CHECK_PROXY_MODE", "file": "proxy.py", "type": "str", "group": "代理池",
         "label": "套餐/Agent网络模式", "help": "用于查套餐和生成 Agent Token；auto=本地代理可用则走代理、未监听则直连；proxy=强制代理；direct=强制直连",
     },

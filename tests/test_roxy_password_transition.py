@@ -66,20 +66,29 @@ class PasswordTransitionTests(unittest.TestCase):
         script = self.scripts[-1]
         harness = """
         const assert = require('node:assert/strict');
-        let clicks = 0, inputs = [];
-        const submit = {disabled:false, getClientRects:()=>[1], getAttribute:()=>null, click:()=>clicks++};
-        const form = {querySelector:()=>submit};
+        let submissions = 0, inputs = [];
+        const submit = {disabled:false, getClientRects:()=>[1], getAttribute:()=>null};
+        const form = {querySelector:()=>submit, checkValidity:()=>true,
+          requestSubmit:button=>{assert.equal(button,submit); submissions++;}};
         const pass = {value:'test-password', getClientRects:()=>[1], closest:()=>form};
         global.document = {querySelectorAll:()=>inputs};
         const retry = () => { SCRIPT };
-        assert.equal(retry().clicked, false);
-        assert.equal(clicks, 0);
+        assert.equal(retry().submitted, false);
+        assert.equal(submissions, 0);
         inputs = [pass];
-        assert.equal(retry().clicked, true);
-        assert.equal(clicks, 1);
+        assert.equal(retry().submitted, true);
+        assert.equal(submissions, 1);
         submit.disabled = true;
-        assert.equal(retry().clicked, false);
-        assert.equal(clicks, 1);
+        assert.equal(retry().submitted, false);
+        assert.equal(submissions, 1);
+        submit.disabled = false;
+        form.checkValidity = ()=>false;
+        assert.equal(retry().reason, 'invalid_form');
+        assert.equal(submissions, 1);
+        form.checkValidity = ()=>true;
+        form.__roxyPasswordSubmission = {submitEvents:1};
+        assert.equal(retry().reason, 'submit_event_already_observed');
+        assert.equal(submissions, 1);
         """.replace("SCRIPT", script)
         subprocess.run([shutil.which("node"), "-e", harness], check=True, capture_output=True, text=True)
 

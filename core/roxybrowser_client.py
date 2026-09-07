@@ -440,7 +440,8 @@ class RoxyBrowserClient:
         if bool(getattr(_cfg, "ROXY_CREATE_USE_PROXY_POOL", False)) and not body.get("proxyInfo"):
             from config import proxy as _proxy_cfg
 
-            proxy_url = _proxy_cfg.pick_proxy()
+            proxy_picker = getattr(_proxy_cfg, "pick_proxy_for_task", _proxy_cfg.pick_proxy)
+            proxy_url = proxy_picker()
             if proxy_url:
                 proxy_info = _proxy_url_to_roxy_info(proxy_url)
                 body["proxyInfo"] = proxy_info

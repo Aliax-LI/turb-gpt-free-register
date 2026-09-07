@@ -1696,8 +1696,9 @@ class SeleniumTrafficTracker(_TrafficAccumulator):
             )
 
     def log_auth_diagnostics(self, stage: str) -> None:
-        """复用流量事件，不另行消费 performance log；只输出认证请求的脱敏摘要。"""
+        """复用流量事件输出脱敏诊断；失败时补充认证接口之外的异常请求。"""
         self.checkpoint()
+        self._log_browser_errors(stage)
         records = []
         for record in self._requests.values():
             request = record.get("request") or {}
@@ -1739,6 +1740,53 @@ class SeleniumTrafficTracker(_TrafficAccumulator):
                         pass
             detail["error_code"] = record.get("error_code")
             logger.info("[%s][认证网络] stage=%s %s", self.label, stage, json.dumps(detail, ensure_ascii=False))
+
+        if stage in {"password_timeout", "password_page_error", "registration_failed"}:
+            # 认证接口以外的脚本/依赖也可能阻止提交。未完成只表示采集时尚未结束。
+            abnormal = [record for record in self._requests.values() if (
+                record.get("failed") or record.get("blocked_by_data_saver")
+                or not record.get("finished")
+                or _non_negative_int((record.get("response") or {}).get("status")) >= 400
+            )]
+            logger.info("[%s][异常网络] stage=%s 总数=%s（最多显示最近50条）", self.label, stage, len(abnormal))
+            for record in abnormal[-50:]:
+                request = record.get("request") or {}
+                error = re.search(r"(?:net::)?ERR_[A-Z0-9_]+", str(record.get("network_error") or ""), re.I)
+                detail = {
+                    "url": _safe_url_for_log(request.get("url")),
+                    "method": request.get("method"), "resource_type": record.get("resource_type"),
+                    "status": (record.get("response") or {}).get("status"),
+                    "failed": bool(record.get("failed")), "unfinished": not bool(record.get("finished")),
+                    "blocked": bool(record.get("blocked_by_data_saver")),
+                    "network_error": error.group() if error else None,
+                }
+                logger.info("[%s][异常网络] stage=%s %s", self.label, stage, json.dumps(detail, ensure_ascii=False))
+
+    def _log_browser_errors(self, stage: str) -> None:
+        """Console 只记录标准异常类型/网络错误码，避免应用日志泄露密码或令牌。"""
+        try:
+            entries = self.driver.get_log("browser")
+        except Exception:
+            logger.info("[%s][浏览器异常] stage=%s 可读=False", self.label, stage)
+            return
+        for entry in entries:
+            if entry.get("level") not in {"SEVERE", "WARNING"}:
+                continue
+            message = str(entry.get("message") or "")
+            error = re.search(r"\b(?:TypeError|ReferenceError|SyntaxError|RangeError|EvalError|URIError|Error)\b", message)
+            network_error = re.search(r"(?:net::)?ERR_[A-Z0-9_]+", message, re.I)
+            location = re.match(r"(https?://\S+)\s+(\d+):(\d+)\s", message)
+            detail = {
+                "level": entry.get("level"),
+                "source": entry.get("source") if entry.get("source") in {"javascript", "network", "console-api", "security"} else "other",
+                "error_type": error.group() if error else "unclassified",
+                "network_error": network_error.group() if network_error else None,
+                "unhandled_rejection": "Uncaught (in promise)" in message,
+                "url": _safe_url_for_log(location.group(1)) if location else None,
+                "line": int(location.group(2)) if location else None,
+                "column": int(location.group(3)) if location else None,
+            }
+            logger.info("[%s][浏览器异常] stage=%s %s", self.label, stage, json.dumps(detail, ensure_ascii=False))
 
     def checkpoint(self) -> None:
         if not self._stopped:

@@ -11,6 +11,9 @@
 """
 from config.env_loader import apply_env_overrides
 import random
+import re
+import secrets
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 
 # 本地代理入口；实际出口地区以代理/分流规则为准。
@@ -18,6 +21,11 @@ import random
 PROXY_POOL = [
     "socks5://127.0.0.1:7897",
 ]
+
+# IPRocket 等代理支持通过用户名中的 Lsid/TTL 参数保持会话。
+# 开启后，使用代理池创建注册环境时每个任务生成独立 Lsid，避免多个任务共享出口 IP。
+PROXY_STICKY_SESSION_PER_TASK: bool = True
+PROXY_STICKY_SESSION_TTL: int = 300
 
 # 套餐/Plus 试用资格查询与 Codex Agent Token 生成共用这组独立网络策略，
 # 避免批量请求被注册代理池中的临时本地代理拖垮，也避免无条件直连造成出口策略失控。
@@ -52,12 +60,58 @@ def pick_proxy() -> str:
     return random.choice(PROXY_POOL) if PROXY_POOL else ""
 
 
+def _new_sticky_session_id() -> str:
+    """生成与常见 IPRocket Lsid 格式兼容的 9 位会话 ID。"""
+    return str(secrets.randbelow(900_000_000) + 100_000_000)
+
+
+def _proxy_with_task_sticky_session(proxy_url: str) -> str:
+    """为代理认证用户名写入本任务独立的 Lsid 和 TTL。"""
+    text = str(proxy_url or "").strip()
+    if not text or not bool(PROXY_STICKY_SESSION_PER_TASK):
+        return text
+    try:
+        parsed = urlsplit(text)
+        username = unquote(parsed.username or "")
+        password = unquote(parsed.password or "")
+        if not username:
+            return text
+        ttl = max(1, int(PROXY_STICKY_SESSION_TTL or 300))
+        session_id = _new_sticky_session_id()
+        if re.search(r"-Lsid-[^-]+", username, re.IGNORECASE):
+            username = re.sub(r"(-Lsid-)[^-]+", rf"\g<1>{session_id}", username, count=1, flags=re.IGNORECASE)
+        else:
+            username += f"-Lsid-{session_id}"
+        if re.search(r"-TTL-\d+", username, re.IGNORECASE):
+            username = re.sub(r"(-TTL-)\d+", rf"\g<1>{ttl}", username, count=1, flags=re.IGNORECASE)
+        else:
+            username += f"-TTL-{ttl}"
+        auth = quote(username, safe="-._~")
+        if parsed.password is not None:
+            auth += ":" + quote(password, safe="-._~!$&'()*+,;=")
+        auth += "@"
+        host = parsed.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        netloc = auth + host + (f":{parsed.port}" if parsed.port else "")
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+    except (TypeError, ValueError, UnicodeError):
+        return text
+
+
+def pick_proxy_for_task() -> str:
+    """为一个任务抽取代理；可选地为其生成独立粘性会话。"""
+    return _proxy_with_task_sticky_session(pick_proxy())
+
+
 # 兼容入口：默认每次进程启动随机选一个，作为本次注册全程的固定代理
 PROXY = pick_proxy()
 
 # ---- .env overrides for WebUI editable fields ----
 apply_env_overrides(globals(), {
     'PROXY_POOL': 'list_str_multiline',
+    'PROXY_STICKY_SESSION_PER_TASK': 'bool',
+    'PROXY_STICKY_SESSION_TTL': 'int',
     'PLAN_CHECK_PROXY_MODE': 'str',
     'PLAN_CHECK_PROXY': 'str',
     'PLAN_CHECK_TIMEOUT': 'float',

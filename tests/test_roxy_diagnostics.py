@@ -9,6 +9,32 @@ from core.browser_traffic import SeleniumTrafficTracker
 
 
 class RoxyDiagnosticsTests(unittest.TestCase):
+    def test_failure_diagnostics_include_external_dependencies_and_console(self):
+        driver = Mock()
+        driver.get_log.side_effect = lambda name: [{
+            "level": "SEVERE", "source": "javascript",
+            "message": "https://cdn.example.test/app.js?token=private-query 12:3 Uncaught (in promise) TypeError: private-password private-token",
+        }] if name == "browser" else []
+        tracker = SeleniumTrafficTracker(driver)
+        for request_id in ("script", "pending"):
+            tracker._handle_cdp_event("Network.requestWillBeSent", {
+                "requestId": request_id, "type": "Script",
+                "request": {"method": "GET", "url": "https://cdn.example.test/app.js?token=private-token"},
+            })
+        tracker._handle_cdp_event("Network.loadingFailed", {
+            "requestId": "script", "errorText": "net::ERR_CONNECTION_RESET private-password",
+        })
+        with self.assertLogs("core.browser_traffic", level="INFO") as logs:
+            tracker.log_auth_diagnostics("password_timeout")
+        text = "\n".join(logs.output)
+        self.assertIn("cdn.example.test/app.js", text)
+        self.assertIn("ERR_CONNECTION_RESET", text)
+        self.assertIn('"unfinished": true', text)
+        self.assertIn('"error_type": "TypeError"', text)
+        self.assertIn('"unhandled_rejection": true', text)
+        self.assertIn('"line": 12', text)
+        self.assertNotIn("private-", text)
+
     def test_network_diagnostics_keep_failure_code_and_hide_credentials(self):
         driver = Mock()
         driver.get_log.return_value = []

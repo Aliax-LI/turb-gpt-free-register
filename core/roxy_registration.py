@@ -89,7 +89,7 @@ def _release_roxy_exit_ip(exit_ip: str | None) -> None:
 def _enable_performance_logging(options) -> None:
     """尽量开启 Chrome performance log；不支持时不阻断注册。"""
     try:
-        options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
+        options.set_capability("goog:loggingPrefs", {"performance": "ALL", "browser": "ALL"})
     except Exception as exc:
         logger.debug("[Roxy] 当前 Selenium 选项不支持 performance log：%s", exc)
 
@@ -1678,7 +1678,7 @@ def _password_page_state(driver) -> dict:
         })).slice(0, 30);
         const forms = [...document.querySelectorAll('form')].map(f => {
           const action = new URL(f.getAttribute('action') || location.href, location.href);
-          return {action: action.origin + action.pathname};
+          return {action: action.origin + action.pathname, submission: f.__roxyPasswordSubmission || null};
         });
         const buttons = [...document.querySelectorAll('button,input[type="submit"]')].map(el => ({
           type: el.getAttribute('type') || '', name: el.getAttribute('name') || '', id: el.id || '',
@@ -1950,6 +1950,15 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25, diagno
         }).sort((a,b) => b.score - a.score || a.idx - b.idx);
         const target = scored[0]?.el;
         if (!target) return {ok:false, reason:'missing_enabled_submit'};
+        if (form && form !== document && !form.__roxyPasswordSubmission) {
+          const state = {submitEvents:0, invalidEvents:0, defaultPrevented:null};
+          form.__roxyPasswordSubmission = state;
+          form.addEventListener('submit', event => {
+            state.submitEvents += 1;
+            queueMicrotask(() => { state.defaultPrevented = event.defaultPrevented; });
+          }, true);
+          form.addEventListener('invalid', () => { state.invalidEvents += 1; }, true);
+        }
         target.scrollIntoView({block:'center'});
         return {
           ok:true,
@@ -1966,7 +1975,7 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25, diagno
         report("password_before_submit")
         _human_click(driver, submit_result.get("button"), label="password_submit")
         report("password_after_submit")
-        logger.info("%s 已填写并点击密码页 Continue：detail=%s", _log_prefix(driver), {k: v for k, v in submit_result.items() if k != "button"})
+        logger.info("%s 已填写密码并执行 Continue 点击，等待确认提交结果：detail=%s", _log_prefix(driver), {k: v for k, v in submit_result.items() if k != "button"})
         # 提交密码后通常进入邮箱验证码页，最多等一段时间。
         wait_end = time.time() + 20
         retried_submit = False
@@ -1989,7 +1998,7 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25, diagno
                 raise RuntimeError("密码提交失败，页面提示：" + "; ".join(dict.fromkeys(last["errors"])))
             if not retried_submit and time.time() > wait_end - 15 and _is_signup_password_page(driver):
                 retried_submit = True
-                logger.info("%s 密码页点击后仍未跳转，等待后检查密码表单并重试一次", _log_prefix(driver))
+                logger.info("%s 密码页仍未跳转，检查是否需要补发表单提交", _log_prefix(driver))
                 human_delay("form", minimum=1.2, maximum=2.2)
                 report("password_before_retry")
                 # 检查和点击放在同一次脚本中，避免等待期间跳到 OTP 页后误提交空验证码。
@@ -1999,9 +2008,14 @@ def _fill_password_page_if_present(driver, email: str, timeout: int = 25, diagno
                 const form = pass?.closest('form');
                 const submit = form?.querySelector('button[type="submit"],input[type="submit"]');
                 if (!pass?.value || !submit || !submit.getClientRects().length || submit.disabled
-                    || submit.getAttribute('aria-disabled') === 'true') return {clicked:false};
-                submit.click();
-                return {clicked:true};
+                    || submit.getAttribute('aria-disabled') === 'true') return {submitted:false, reason:'form_not_ready'};
+                if (form.__roxyPasswordSubmission?.submitEvents > 0)
+                  return {submitted:false, reason:'submit_event_already_observed', ...form.__roxyPasswordSubmission};
+                if (!form.checkValidity()) return {submitted:false, reason:'invalid_form'};
+                if (typeof form.requestSubmit !== 'function') return {submitted:false, reason:'request_submit_unavailable'};
+                // 保留 HTML 校验和应用的 submit 处理器；不能使用会绕过它们的 form.submit()。
+                form.requestSubmit(submit);
+                return {submitted:true, reason:'request_submit_dispatched', ...form.__roxyPasswordSubmission};
                 """)
                 logger.info("%s 密码表单重试结果：%s", _log_prefix(driver), retry_result)
                 report("password_after_retry")
