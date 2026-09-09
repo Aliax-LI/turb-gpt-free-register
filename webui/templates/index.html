@@ -2205,6 +2205,7 @@
           <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="只查询/显示已开通 Plus 的账号">已开通Plus</button>
           <button type="button" class="acc-v2-toggle" id="showPlusTrialAccountsOnlyV2" aria-pressed="false" title="只查询/显示当前为 free 且可试用 Plus 的账号">可试用Plus</button>
           <button type="button" class="acc-v2-toggle" id="showFreeAccountsOnlyV2" aria-pressed="false" title="只查询/显示已明确不能试用 Plus 的 free 账号；资格未知的账号不包含">free不可试用Plus</button>
+          <button type="button" class="acc-v2-toggle" id="showC2aAbnormalAccountsV2" aria-pressed="false" title="拉取 ChatGPT2API 状态为异常的账号并筛选出对应本地账号；随后手动点查活，成功会导入新 Token 并删除旧账号，判定已废只删除旧账号">C2A异常</button>
           <label class="acc-v2-inline" title="按账号状态筛选账号">
             <select id="codexStatusFilterV2">
               <option value="">全部状态</option>
@@ -2569,6 +2570,8 @@ let SHOW_ARCHIVED_ACCOUNTS = false;
 let SHOW_PLUS_ACCOUNTS_ONLY = false;
 let SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = false;
 let SHOW_FREE_ACCOUNTS_ONLY = false;
+// ChatGPT2API 异常账号筛选：为空数组表示已开启筛选但没有匹配到本地账号，null 表示未开启。
+let C2A_ABNORMAL_IDS = null;
 const ACCOUNT_SELECTED = new Set();
 const OUTLOOK_SELECTED = new Set();
 let JOBS = [];
@@ -3236,6 +3239,12 @@ function getCodexBulkWorkers() {
   const el = document.getElementById('codexBulkWorkersV2');
   return Math.max(1, Math.min(16, Number((el && el.value) || 3)));
 }
+function getAccountsIdsParam() {
+  if (C2A_ABNORMAL_IDS === null) return '';
+  // 筛选开启但没匹配到账号时也要传 ids=-1，否则会退化成显示全部账号。
+  const ids = C2A_ABNORMAL_IDS.length ? C2A_ABNORMAL_IDS : [-1];
+  return `&ids=${encodeURIComponent(ids.join(','))}`;
+}
 function getAccountsPlanFilter() {
   if (SHOW_PLUS_ACCOUNTS_ONLY) return 'plus';
   if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) return 'plus_trial';
@@ -3254,7 +3263,7 @@ async function loadAccounts() {
     const dateFrom = document.getElementById('dateFromAccountsV2')?.value || '';
     const dateTo = document.getElementById('dateToAccountsV2')?.value || '';
     const p = PAGERS.accounts;
-    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
+    const res = await api(`/api/accounts?paged=1&page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}${getAccountsIdsParam()}`);
     ACCOUNTS = res.items || [];
     ACCOUNTS_TOTAL = Number(res.total || ACCOUNTS.length || 0);
     const totalPages = Math.max(1, Math.ceil(ACCOUNTS_TOTAL / p.size));
@@ -3275,7 +3284,7 @@ async function pollAccountPlanStatuses() {
     const dateFrom = document.getElementById('dateFromAccountsV2')?.value || '';
     const dateTo = document.getElementById('dateToAccountsV2')?.value || '';
     const p = PAGERS.accounts;
-    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`);
+    const snapshot = await api(`/api/accounts/plan-check-status?page=${encodeURIComponent(p.page)}&page_size=${encodeURIComponent(p.size)}&archived=${encodeURIComponent(archived)}&plan=${encodeURIComponent(plan)}&codex_status=${encodeURIComponent(codex)}&totp_status=${encodeURIComponent(totp)}&q=${encodeURIComponent(q)}&date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}${getAccountsIdsParam()}`);
     const items = snapshot.items || [];
     const accountById = new Map(ACCOUNTS.map(r => [Number(r.id), r]));
     const hasUnknown = items.some(item => !accountById.has(Number(item.id)));
@@ -4027,6 +4036,38 @@ async function applyAccountsFreeFilter(on) {
   await loadAccounts();
   await pollAccountPlanStatuses();
 }
+async function applyC2aAbnormalFilter(on, btn) {
+  const el = btn || $('#showC2aAbnormalAccountsV2');
+  if (!on) {
+    C2A_ABNORMAL_IDS = null;
+    setAccountsFilterToggle(el, false);
+    ACCOUNT_SELECTED.clear();
+    PAGERS.accounts.page = 1;
+    await loadAccounts();
+    await pollAccountPlanStatuses();
+    return;
+  }
+  const old = el ? el.textContent : '';
+  if (el) { el.disabled = true; el.textContent = '扫描中…'; }
+  try {
+    const r = await api('/api/chatgpt2api/abnormal-scan', {method:'POST'});
+    C2A_ABNORMAL_IDS = (r.account_ids || []).map(Number);
+    setAccountsFilterToggle(el, true);
+    ACCOUNT_SELECTED.clear();
+    C2A_ABNORMAL_IDS.forEach(id => ACCOUNT_SELECTED.add(Number(id)));
+    PAGERS.accounts.page = 1;
+    await loadAccounts();
+    await pollAccountPlanStatuses();
+    const unmatched = Number(r.unmatched_remote || 0);
+    const archived = Number(r.archived_count || 0);
+    showToast(`ChatGPT2API 异常 ${r.abnormal_count || 0} 个，已筛选并选中本地账号 ${r.matched_count || 0} 个${unmatched ? `，本地无对应 ${unmatched} 个` : ''}${archived ? `，其中 ${archived} 个已归档（需开「查看归档」才可见）` : ''}；请点「查活」`);
+  } catch(err) {
+    setAccountsFilterToggle(el, C2A_ABNORMAL_IDS !== null);
+    showToast('扫描 ChatGPT2API 异常账号失败: ' + err.message);
+  } finally {
+    if (el) { el.disabled = false; el.textContent = old || 'C2A异常'; }
+  }
+}
 async function refreshAccountsList(btn) {
   if (!btn) return;
   const old = btn.textContent;
@@ -4080,6 +4121,10 @@ async function refreshAccountsList(btn) {
   const freeV2 = $('#showFreeAccountsOnlyV2');
   if (freeV2) freeV2.addEventListener('click', () => {
     applyAccountsFreeFilter(!SHOW_FREE_ACCOUNTS_ONLY);
+  });
+  const c2aV2 = $('#showC2aAbnormalAccountsV2');
+  if (c2aV2) c2aV2.addEventListener('click', () => {
+    applyC2aAbnormalFilter(C2A_ABNORMAL_IDS === null, c2aV2);
   });
   const refreshV2 = $('#btnRefreshAccountsV2');
   if (refreshV2) refreshV2.addEventListener('click', () => refreshAccountsList(refreshV2));

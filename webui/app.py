@@ -39,6 +39,24 @@ def _pool_source_arg(default: str = "outlook") -> str:
     return src if src in _POOL_SOURCE_VALUES else default
 
 
+def _ids_arg() -> list[int] | None:
+    """解析 ?ids=1,2,3 账号 ID 过滤；未传时返回 None 表示不按 ID 过滤。"""
+    raw = str(request.args.get("ids") or "").strip()
+    if not raw:
+        return None
+    ids: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ids.append(int(part))
+        except ValueError:
+            continue
+    # SQLite 单条语句的绑定参数上限是 999，与批量查活上限保持一致截断。
+    return ids[:500]
+
+
 def _with_pool_source(rows: list[dict], source: str) -> list[dict]:
     out = []
     for r in rows:
@@ -403,7 +421,7 @@ def create_app(auth_code: str | None = None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter)
+            result = db.list_accounts_page(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, ids=_ids_arg())
             result["items"] = [_compact_account_for_list(r) for r in (result.get("items") or [])]
             result.update({"ok": True, "page": page, "page_size": page_size, "compact": True})
             return jsonify(result)
@@ -431,10 +449,10 @@ def create_app(auth_code: str | None = None) -> Flask:
             page = max(1, int(page_arg or 1))
             page_size = max(1, min(500, int(page_size_arg or limit or 50)))
             offset = (page - 1) * page_size
-            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter)
+            snapshot = db.list_account_plan_check_statuses(limit=page_size, offset=offset, archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, ids=_ids_arg())
             snapshot.update({"page": page, "page_size": page_size})
         else:
-            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter)
+            snapshot = db.list_account_plan_check_statuses(limit=max(1, min(5000, limit)), archived=archived, plan_filter=plan_filter, codex_filter=codex_filter, q=q, date_from=date_from, date_to=date_to, totp_filter=totp_filter, ids=_ids_arg())
         snapshot["queue"] = plan_check_service.queue_settings()
         return jsonify(snapshot)
 
@@ -808,6 +826,23 @@ def create_app(auth_code: str | None = None) -> Flask:
             "queue": live_check_service.queue_settings(),
         }), 202
 
+
+    @app.post("/api/chatgpt2api/abnormal-scan")
+    def api_chatgpt2api_abnormal_scan():
+        """扫描 ChatGPT2API 状态异常的账号，返回匹配到的本地账号 ID 供前端筛选。
+
+        同时记住这些账号在 ChatGPT2API 上的旧 token：随后手动查活成功会导入新
+        token 并删除旧账号；查活判定账号已废则只删除旧账号。
+        """
+        from core import chatgpt2api_sync
+
+        result = chatgpt2api_sync.scan_abnormal_accounts()
+        if not result.get("ok"):
+            return jsonify(result), 502
+        result["message"] = (
+            f"ChatGPT2API 异常 {result['abnormal_count']} 个，匹配本地账号 {result['matched_count']} 个"
+        )
+        return jsonify(result)
 
     @app.post("/api/accounts/check-plan")
     def api_account_check_plan():

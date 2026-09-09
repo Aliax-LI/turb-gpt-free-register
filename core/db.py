@@ -447,14 +447,22 @@ def _account_filter_sql(
     plan_filter: str | None = None,
     codex_filter: str | None = None,
     totp_filter: str | None = None,
+    ids: list[int] | None = None,
 ) -> tuple[list[str], list[Any]]:
-    """把账号列表的套餐、Codex、2FA 过滤条件下推到 SQLite。
+    """把账号列表的套餐、Codex、2FA、ID 过滤条件下推到 SQLite。
 
     套餐、Codex、2FA 状态仍保存在账号 payload 中，因此这里使用 SQLite JSON1
     直接过滤，而不是先把整张 accounts 表反序列化到 Python 再切页。
     """
     where: list[str] = []
     params: list[Any] = []
+    if ids is not None:
+        # 显式 ID 集合为空时不能退化成“不过滤”，否则会把全部账号当成命中结果。
+        id_list = [int(i) for i in ids]
+        if not id_list:
+            return ["1=0"], []
+        where.append(f"id IN ({','.join('?' * len(id_list))})")
+        params.extend(id_list)
     plan = str(plan_filter or "").strip().lower()
     codex = str(codex_filter or "").strip().lower()
     totp = str(totp_filter or "").strip().lower()
@@ -1497,6 +1505,7 @@ def list_account_plan_check_statuses(
     date_from: str | None = None,
     date_to: str | None = None,
     totp_filter: str | None = None,
+    ids: list[int] | None = None,
 ) -> dict:
     """返回不含 Token/邮箱密码的套餐查询轻量状态快照。"""
     fields = (
@@ -1530,6 +1539,7 @@ def list_account_plan_check_statuses(
             plan_filter=plan_filter,
             codex_filter=codex_filter,
             totp_filter=totp_filter,
+            ids=ids,
         )
         candidates, total, latest = _query_collection_page(
             "accounts",
@@ -1632,6 +1642,7 @@ def list_accounts_page(
     date_from: str | None = None,
     date_to: str | None = None,
     totp_filter: str | None = None,
+    ids: list[int] | None = None,
 ) -> dict:
     with _LOCK:
         limit = max(1, int(limit))
@@ -1640,6 +1651,7 @@ def list_accounts_page(
             plan_filter=plan_filter,
             codex_filter=codex_filter,
             totp_filter=totp_filter,
+            ids=ids,
         )
         candidates, total, latest = _query_collection_page(
             "accounts",

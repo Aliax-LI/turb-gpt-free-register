@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
-from core import db
+from core import chatgpt2api_sync, db
 from core.account_liveness import check_account_liveness, log_path
 from core.chatgpt_plan import resolve_plan_check_route
 
@@ -36,6 +36,28 @@ def _append_log(email: str, line: str, *, clear: bool = False) -> None:
     mode = "w" if clear else "a"
     with p.open(mode, encoding="utf-8") as f:
         f.write(f"{stamp} [INFO] {line}\n")
+
+
+def _sync_chatgpt2api(account_id: int, email: str, result: dict) -> None:
+    """查活结束后处理 ChatGPT2API 旧账号；失败只记日志，不影响查活结果。"""
+    try:
+        synced = chatgpt2api_sync.handle_live_check_finished(account_id, result)
+    except Exception as exc:
+        logger.exception("[ChatGPT2API] 查活后同步异常: account_id=%s", account_id)
+        _append_log(email, f"[ChatGPT2API] 同步异常：{type(exc).__name__}: {str(exc)[:160]}")
+        return
+    if not synced:
+        return
+    if not synced.get("handled"):
+        _append_log(email, f"[ChatGPT2API] 未处理：{synced.get('reason') or '-'}")
+        return
+    imported = synced.get("imported") or {}
+    deleted = synced.get("deleted") or {}
+    _append_log(
+        email,
+        f"[ChatGPT2API] 导入新账号 {imported.get('status')}（{imported.get('message') or '-'}）；"
+        f"删除旧账号 {deleted.get('status')}（{deleted.get('message') or '-'}）",
+    )
 
 
 def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: str) -> dict:
@@ -95,6 +117,7 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             _append_log(email, f"[查活] 完成：账号已废 {result.get('error') or ''}")
         else:
             _append_log(email, f"[查活] 完成：失败 {result.get('error') or ''}")
+        _sync_chatgpt2api(account_id, email, result)
         return result
     except Exception as exc:
         result = {
