@@ -474,12 +474,22 @@ def _account_filter_sql(
             where.append(f"{plan_expr} = ?")
             where.append(f"{trial_expr} IN (?, ?, ?, ?)")
             params.extend(["free", "1", "true", "yes", "on"])
-        elif plan in {"free_no_trial", "free_without_trial", "free_not_trial"}:
-            # 只匹配已明确查询到“不具备 Plus 试用资格”的 free 账号；字段缺失表示资格未知，不命中。
-            trial_expr = "lower(COALESCE(CAST(json_extract(payload, '$.plus_trial_eligible') AS TEXT), ''))"
+        elif plan in {"promo", "promotion", "plan_promo", "eligible_promo"}:
+            # 当前套餐必须是 free，并且任意套餐存在至少一个可用优惠活动；
+            # 不限定 Plus。eligible_promo_campaigns 是以套餐名为 key 的对象。
+            promo_expr = "json_extract(payload, '$.eligible_promo_campaigns')"
             where.append(f"{plan_expr} = ?")
-            where.append(f"{trial_expr} IN (?, ?, ?, ?)")
-            params.extend(["free", "0", "false", "no", "off"])
+            where.append("json_type(payload, '$.eligible_promo_campaigns') = 'object'")
+            where.append(f"EXISTS (SELECT 1 FROM json_each({promo_expr}))")
+            params.append("free")
+        elif plan in {"free_no_trial", "free_without_trial", "free_not_trial"}:
+            # 只匹配已成功查询且没有任何套餐优惠的 free 账号；字段缺失代表
+            # 尚未得到完整优惠结果，不应归入“不可试用套餐”。
+            promo_expr = "json_extract(payload, '$.eligible_promo_campaigns')"
+            where.append(f"{plan_expr} = ?")
+            where.append("json_type(payload, '$.eligible_promo_campaigns') = 'object'")
+            where.append(f"NOT EXISTS (SELECT 1 FROM json_each({promo_expr}))")
+            params.append("free")
         elif plan == "free":
             where.append(f"{plan_expr} = ?")
             params.append("free")
@@ -792,7 +802,7 @@ def _decorate_account(row: dict) -> dict:
 
 
 def _account_matches_plan_filter(row: dict, plan_filter: str | None = None) -> bool:
-    """账号套餐过滤：支持已开通 Plus、可试用 Plus、不可试用 Plus 的 free 账号。"""
+    """账号套餐过滤：支持已开通 Plus、任意套餐优惠及 free 资格过滤。"""
     f = str(plan_filter or "").strip().lower()
     if not f or f in {"all", "any"}:
         return True
@@ -806,13 +816,12 @@ def _account_matches_plan_filter(row: dict, plan_filter: str | None = None) -> b
         if isinstance(trial, str):
             trial = trial.strip().lower() in {"1", "true", "yes", "on"}
         return plan == "free" and bool(trial)
+    if f in {"promo", "promotion", "plan_promo", "eligible_promo"}:
+        campaigns = row.get("eligible_promo_campaigns")
+        return plan == "free" and isinstance(campaigns, dict) and bool(campaigns)
     if f in {"free_no_trial", "free_without_trial", "free_not_trial"}:
-        if "plus_trial_eligible" not in row:
-            return False
-        trial = row.get("plus_trial_eligible")
-        if isinstance(trial, str):
-            trial = trial.strip().lower() in {"1", "true", "yes", "on"}
-        return plan == "free" and not bool(trial)
+        campaigns = row.get("eligible_promo_campaigns")
+        return plan == "free" and isinstance(campaigns, dict) and not campaigns
     if f == "free":
         return plan == "free"
     return plan == f

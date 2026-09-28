@@ -272,6 +272,14 @@
     .accounts-table .account-email-status { color: #b54708; }
     .accounts-table .mono { font-size: 11px; }
     .accounts-table .pill { min-width: auto; padding: 2px 6px; font-size: 11px; }
+    .accounts-table .plan-promo-stack {
+      display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+      width: 100%; white-space: normal;
+    }
+    .accounts-table .plan-promo-stack .pill {
+      display: inline-flex; max-width: 100%; height: auto; min-height: 22px;
+      line-height: 1.3; text-align: left; white-space: normal; overflow-wrap: anywhere;
+    }
     .accounts-table .actions { gap: 4px; }
     .accounts-table .actions button { min-height: 24px; padding: 0 7px; font-size: 11px; border-radius: 5px; transition: transform .12s ease, box-shadow .12s ease, background .12s ease; }
 
@@ -536,8 +544,8 @@
             <label class="inline-num" title="只查询/显示已开通套餐的账号">
               <input id="showPlusAccountsOnly" type="checkbox" style="width:auto;min-height:auto;"> 已开通套餐
             </label>
-            <label class="inline-num" title="只查询/显示当前为 free 且可试用套餐的账号">
-              <input id="showPlusTrialAccountsOnly" type="checkbox" style="width:auto;min-height:auto;"> 可试用套餐
+            <label class="inline-num" title="只查询/显示当前为 free 且存在 eligible_promo_campaigns 套餐优惠的账号，不限 Plus">
+              <input id="showPlusTrialAccountsOnly" type="checkbox" style="width:auto;min-height:auto;"> 有套餐优惠
             </label>
             <label class="inline-num" title="只查询/显示已明确不能试用套餐的 free 账号；资格未知的账号不包含">
               <input id="showFreeAccountsOnly" type="checkbox" style="width:auto;min-height:auto;"> free不可试用套餐
@@ -1295,7 +1303,7 @@ function getAccountsTotpFilter() {
 }
 function getAccountsPlanFilter() {
   if (SHOW_PLUS_ACCOUNTS_ONLY) return 'plus';
-  if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) return 'plus_trial';
+  if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) return 'promo';
   if (SHOW_FREE_ACCOUNTS_ONLY) return 'free_no_trial';
   return '';
 }
@@ -1451,6 +1459,11 @@ function _promoSummaries(campaigns) {
     return `${_promoPlanName(key, campaign)}：${offer}${duration ? `/${duration}` : ''}`;
   });
 }
+function _promoStackHtml(baseText, baseClass, summaries, title, detailBtn = '') {
+  const base = `<span class="pill ${baseClass}" title="${esc(title)}">${esc(baseText)}</span>`;
+  const lines = summaries.map(item => `<span class="pill status-success" title="${esc(item)}">${esc(item)}</span>`).join('');
+  return `<div class="plan-promo-stack">${base}${lines}${detailBtn}</div>`;
+}
 function _planCell(r) {
   const ok = r.plan_check_ok;
   const err = r.plan_check_error || '';
@@ -1486,12 +1499,11 @@ function _planCell(r) {
     if (!checkedOk) {
       return `<span class="pill status-running" title="${title}">${esc(plan)}（待查资格）</span>`;
     }
-    const text = promoSummaries.length ? `free（${promoSummaries.join('；')}）` : 'free';
     const cls = promoSummaries.length ? 'status-success' : 'status-used';
     const t = promoSummaries.length ? `${title}；可用套餐优惠：${promoSummaries.join('；')}` : title;
     const keys = Object.keys(campaigns);
     const detailBtn = keys.length ? `<button type="button" class="promo-detail-btn" data-promo-details="${esc(JSON.stringify(campaigns))}">详情(${keys.length})</button>` : '';
-    return `<span class="pill ${cls}" title="${t}">${esc(text)}</span>${detailBtn}`;
+    return _promoStackHtml('free', cls, promoSummaries, t, detailBtn);
   }
 
   const isPaid = lower.includes('plus') || lower.includes('pro') || lower.includes('team') || lower.includes('go');
@@ -1505,14 +1517,13 @@ function _planCell(r) {
   if (expire) parts.push(`到期 ${expire}`);
   const discount = _discountLabel(r);
   if (discount) parts.push(discount);
-  if (promoSummaries.length) parts.push(`优惠 ${promoSummaries.join('；')}`);
   const text = parts.length ? `${plan}（${parts.join('/')}）` : plan;
   const detail = [title];
   if (expireRaw) detail.push(`到期时间: ${expireRaw}`);
   if (r.plan_renews_at) detail.push(`续费时间: ${r.plan_renews_at}`);
   if (r.discount_expires_at) detail.push(`折扣结束: ${r.discount_expires_at}`);
   if (r.discount_promo_campaign_id) detail.push(`优惠: ${r.discount_promo_campaign_id}`);
-  return `<span class="pill ${cls}" title="${esc(detail.join('；'))}">${esc(text)}</span>`;
+  return _promoStackHtml(text, cls, promoSummaries, detail.join('；'));
 }
 function _planAction(r) {
   if (['queued','running'].includes(r.plan_check_status)) {
