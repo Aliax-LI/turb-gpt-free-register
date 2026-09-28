@@ -276,6 +276,9 @@
       display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
       width: 100%; white-space: normal;
     }
+    .accounts-table .plan-promo-head {
+      display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+    }
     .accounts-table .plan-promo-stack .pill {
       display: inline-flex; max-width: 100%; height: auto; min-height: 22px;
       line-height: 1.3; text-align: left; white-space: normal; overflow-wrap: anywhere;
@@ -1474,7 +1477,7 @@ function _promoSummaries(campaigns) {
 function _promoStackHtml(baseText, baseClass, summaries, title, detailBtn = '') {
   const base = `<span class="pill ${baseClass}" title="${esc(title)}">${esc(baseText)}</span>`;
   const lines = summaries.map(item => `<span class="pill status-success" title="${esc(item)}">${esc(item)}</span>`).join('');
-  return `<div class="plan-promo-stack">${base}${lines}${detailBtn}</div>`;
+  return `<div class="plan-promo-stack"><div class="plan-promo-head">${base}${detailBtn}</div>${lines}</div>`;
 }
 function _planCell(r) {
   const ok = r.plan_check_ok;
