@@ -2235,6 +2235,12 @@
           <button type="button" class="acc-v2-toggle" id="showArchivedAccountsV2" aria-pressed="false" title="默认只显示未归档账号；开启后单独查看归档账号">查看归档</button>
           <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="只查询/显示已开通套餐的账号">已开通套餐</button>
           <button type="button" class="acc-v2-toggle" id="showPlusTrialAccountsOnlyV2" aria-pressed="false" title="只查询/显示当前为 free 且存在 eligible_promo_campaigns 套餐优惠的账号，不限 Plus">有套餐优惠</button>
+          <label class="acc-v2-inline" title="指定 eligible_promo_campaigns 中的套餐类型；留空表示全部优惠类型">优惠类型
+            <select id="promoTypeFilterV2"><option value="">全部</option><option value="plus">Plus</option><option value="pro">Pro</option><option value="go">Go</option><option value="team">Team</option><option value="business">Business</option></select>
+          </label>
+          <label class="acc-v2-inline" title="按 eligible_promo_campaigns 优惠百分比筛选">优惠力度
+            <select id="promoDiscountFilterV2"><option value="">全部</option><option value="100">100%优惠</option></select>
+          </label>
           <button type="button" class="acc-v2-toggle" id="showFreeAccountsOnlyV2" aria-pressed="false" title="只查询/显示已明确不能试用套餐的 free 账号；资格未知的账号不包含">free不可试用套餐</button>
           <label class="acc-v2-inline" title="按账号状态筛选账号">
             <select id="codexStatusFilterV2">
@@ -3296,7 +3302,11 @@ function getCodexBulkWorkers() {
 }
 function getAccountsPlanFilter() {
   if (SHOW_PLUS_ACCOUNTS_ONLY) return 'plus';
-  if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) return 'promo';
+  if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) {
+    const type = (document.getElementById('promoTypeFilterV2')?.value || '').trim().toLowerCase();
+    const discount = (document.getElementById('promoDiscountFilterV2')?.value || '').trim();
+    return (type || discount) ? `promo:${type || '*'}:${discount}` : 'promo';
+  }
   if (SHOW_FREE_ACCOUNTS_ONLY) return 'free_no_trial';
   return '';
 }
@@ -4224,6 +4234,14 @@ async function refreshAccountsList(btn) {
   const plusTrialV2 = $('#showPlusTrialAccountsOnlyV2');
   if (plusTrialV2) plusTrialV2.addEventListener('click', () => {
     applyAccountsPlusTrialFilter(!SHOW_PLUS_TRIAL_ACCOUNTS_ONLY);
+  });
+  const promoTypeV2 = $('#promoTypeFilterV2');
+  if (promoTypeV2) promoTypeV2.addEventListener('change', () => {
+    applyAccountsPlusTrialFilter(true);
+  });
+  const promoDiscountV2 = $('#promoDiscountFilterV2');
+  if (promoDiscountV2) promoDiscountV2.addEventListener('change', () => {
+    applyAccountsPlusTrialFilter(true);
   });
   const freeV2 = $('#showFreeAccountsOnlyV2');
   if (freeV2) freeV2.addEventListener('click', () => {

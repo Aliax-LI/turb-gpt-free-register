@@ -547,6 +547,14 @@
             <label class="inline-num" title="只查询/显示当前为 free 且存在 eligible_promo_campaigns 套餐优惠的账号，不限 Plus">
               <input id="showPlusTrialAccountsOnly" type="checkbox" style="width:auto;min-height:auto;"> 有套餐优惠
             </label>
+            <label class="inline-num" title="指定 eligible_promo_campaigns 中的套餐类型；留空表示全部优惠类型">
+              优惠类型
+              <select id="promoTypeFilter" style="width:auto;min-height:auto;"><option value="">全部</option><option value="plus">Plus</option><option value="pro">Pro</option><option value="go">Go</option><option value="team">Team</option><option value="business">Business</option></select>
+            </label>
+            <label class="inline-num" title="按 eligible_promo_campaigns 优惠百分比筛选">
+              优惠力度
+              <select id="promoDiscountFilter" style="width:auto;min-height:auto;"><option value="">全部</option><option value="100">100%优惠</option></select>
+            </label>
             <label class="inline-num" title="只查询/显示已明确不能试用套餐的 free 账号；资格未知的账号不包含">
               <input id="showFreeAccountsOnly" type="checkbox" style="width:auto;min-height:auto;"> free不可试用套餐
             </label>
@@ -1303,7 +1311,11 @@ function getAccountsTotpFilter() {
 }
 function getAccountsPlanFilter() {
   if (SHOW_PLUS_ACCOUNTS_ONLY) return 'plus';
-  if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) return 'promo';
+  if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) {
+    const type = ($('#promoTypeFilter')?.value || '').trim().toLowerCase();
+    const discount = ($('#promoDiscountFilter')?.value || '').trim();
+    return (type || discount) ? `promo:${type || '*'}:${discount}` : 'promo';
+  }
   if (SHOW_FREE_ACCOUNTS_ONLY) return 'free_no_trial';
   return '';
 }
@@ -2087,6 +2099,30 @@ $('#showPlusTrialAccountsOnly').addEventListener('change', async (e) => {
     $('#showPlusAccountsOnly').checked = false;
     $('#showFreeAccountsOnly').checked = false;
   }
+  ACCOUNT_SELECTED.clear();
+  PAGERS.accounts.page = 1;
+  await loadAccounts();
+  await pollAccountPlanStatuses();
+});
+$('#promoTypeFilter').addEventListener('change', async () => {
+  SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = true;
+  SHOW_PLUS_ACCOUNTS_ONLY = false;
+  SHOW_FREE_ACCOUNTS_ONLY = false;
+  $('#showPlusTrialAccountsOnly').checked = true;
+  $('#showPlusAccountsOnly').checked = false;
+  $('#showFreeAccountsOnly').checked = false;
+  ACCOUNT_SELECTED.clear();
+  PAGERS.accounts.page = 1;
+  await loadAccounts();
+  await pollAccountPlanStatuses();
+});
+$('#promoDiscountFilter').addEventListener('change', async () => {
+  SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = true;
+  SHOW_PLUS_ACCOUNTS_ONLY = false;
+  SHOW_FREE_ACCOUNTS_ONLY = false;
+  $('#showPlusTrialAccountsOnly').checked = true;
+  $('#showPlusAccountsOnly').checked = false;
+  $('#showFreeAccountsOnly').checked = false;
   ACCOUNT_SELECTED.clear();
   PAGERS.accounts.page = 1;
   await loadAccounts();
