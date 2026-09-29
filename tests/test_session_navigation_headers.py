@@ -99,6 +99,19 @@ class SessionNavigationHeaderTests(unittest.TestCase):
         self.assertNotIn("referer", headers)
         self.assertNotIn("cache-control", headers)
 
+    def test_chrome146_client_hints_match_curl_impersonation(self):
+        session = BrowserSession(proxy="", detect_exit_geo=False)
+        try:
+            headers = session.get_chatgpt_navigate_headers(referer="")
+            self.assertEqual(
+                headers["sec-ch-ua"],
+                '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
+            )
+            self.assertEqual(headers["sec-ch-ua-platform"], '"macOS"')
+            self.assertEqual(headers["sec-ch-ua-mobile"], "?0")
+        finally:
+            session.close()
+
     def test_browser_sessions_are_independent_without_seed(self):
         first = BrowserSession(proxy="", detect_exit_geo=False, device_id="device-for-test")
         second = BrowserSession(proxy="", detect_exit_geo=False, device_id="device-for-test")
