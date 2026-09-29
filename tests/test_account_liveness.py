@@ -260,20 +260,34 @@ class AccountLivenessTests(unittest.TestCase):
         self.assertTrue(reauth_session.session.closed)
         self.assertTrue(full_session.session.closed)
 
-    def test_service_403_fallback_really_uses_direct_connection(self):
+    def test_service_403_rotates_proxy_and_never_falls_back_direct_when_pool_exists(self):
         slot = _DummyQueueSlot()
         failed = {"ok": False, "status": "failed", "error": "HTTP Error 403: blocked"}
         success = {"ok": True, "status": "live", "access_token": "new-token"}
+        proxy_a = "socks5://proxy-a.example:1080"
+        proxy_b = "socks5://proxy-b.example:1080"
+
+        def route_for(explicit_proxy=None):
+            selected = proxy_a if explicit_proxy is None else explicit_proxy
+            return {
+                "proxy": selected,
+                "network_route": "proxy" if selected else "direct",
+                "proxy_mode": "proxy",
+                "proxy_used": selected or None,
+                "upstream_proxy": "",
+                "upstream_proxy_used": None,
+                "proxy_fallback_reason": None,
+            }
+
         with patch.object(live_service, "_QUEUE_SLOTS", slot), \
              patch.object(live_service.db, "mark_account_live_check_running", return_value=True), \
              patch.object(live_service.db, "get_account", return_value={"email_source": "remail"}), \
              patch.object(live_service.db, "update_account_liveness"), \
              patch.object(live_service, "_append_log"), \
-             patch.object(live_service, "resolve_plan_check_route", return_value={
-                 "proxy": "socks5://proxy.example:1080",
-                 "network_route": "proxy",
-                 "proxy_mode": "auto",
-             }), \
+             patch.object(live_service, "resolve_plan_check_route", side_effect=route_for), \
+             patch("config.proxy.PLAN_CHECK_PROXY", [proxy_a, proxy_b]), \
+             patch("config.proxy.PLAN_CHECK_MAX_ATTEMPTS", 3), \
+             patch.object(live_service.random, "choice", return_value=proxy_b), \
              patch.object(live_service, "check_account_liveness", side_effect=[failed, success]) as check:
             result = live_service._run_live_check(
                 account_id=1,
@@ -283,14 +297,45 @@ class AccountLivenessTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
-        self.assertEqual(check.call_args_list[0].kwargs["proxy"], "socks5://proxy.example:1080")
+        self.assertEqual(check.call_args_list[0].kwargs["proxy"], proxy_a)
         self.assertEqual(check.call_args_list[0].kwargs["email_source"], "remail")
-        self.assertEqual(check.call_args_list[1].kwargs["proxy"], "")
+        self.assertEqual(check.call_args_list[1].kwargs["proxy"], proxy_b)
         self.assertEqual(check.call_args_list[1].kwargs["email_source"], "remail")
         self.assertIsNot(
             check.call_args_list[0].kwargs["fingerprint_state"],
             check.call_args_list[1].kwargs["fingerprint_state"],
         )
+        self.assertTrue(slot.released)
+
+    def test_service_does_not_use_direct_when_only_one_pool_proxy_exists(self):
+        slot = _DummyQueueSlot()
+        failed = {"ok": False, "status": "failed", "error": "HTTP Error 403: blocked"}
+        proxy_url = "socks5://only-proxy.example:1080"
+        route = {
+            "proxy": proxy_url,
+            "network_route": "proxy",
+            "proxy_mode": "proxy",
+            "proxy_used": proxy_url,
+            "upstream_proxy": "",
+            "upstream_proxy_used": None,
+            "proxy_fallback_reason": None,
+        }
+        with patch.object(live_service, "_QUEUE_SLOTS", slot), \
+             patch.object(live_service.db, "mark_account_live_check_running", return_value=True), \
+             patch.object(live_service.db, "get_account", return_value={}), \
+             patch.object(live_service.db, "update_account_liveness"), \
+             patch.object(live_service, "_append_log"), \
+             patch.object(live_service, "resolve_plan_check_route", return_value=route), \
+             patch("config.proxy.PLAN_CHECK_PROXY", [proxy_url]), \
+             patch("config.proxy.PLAN_CHECK_MAX_ATTEMPTS", 3), \
+             patch.object(live_service, "check_account_liveness", return_value=failed) as check:
+            result = live_service._run_live_check(
+                account_id=1, email="user@example.com", proxy=None, trigger="manual",
+            )
+
+        self.assertFalse(result["ok"])
+        check.assert_called_once()
+        self.assertEqual(check.call_args.kwargs["proxy"], proxy_url)
         self.assertTrue(slot.released)
 
 
