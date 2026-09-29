@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -78,9 +79,7 @@ class AccountLivenessTests(unittest.TestCase):
 
         self.assertEqual(session.proxy, "")
         self.assertEqual(authorize_url, "https://auth.example/authorize")
-        self.assertTrue(
-            session.kwargs["fingerprint_seed"].startswith("live-check:user@example.com:")
-        )
+        self.assertIsNone(session.kwargs["fingerprint_seed"])
 
     def test_preflight_retries_with_same_session_when_csrf_is_blocked(self):
         csrf_errors = [RuntimeError("HTTP Error 403"), "csrf"]
@@ -152,8 +151,8 @@ class AccountLivenessTests(unittest.TestCase):
         self.assertFalse(second_kwargs["detect_exit_geo"])
         self.assertEqual(second_kwargs["browser_profile"]["navigator_language"], "ja-JP")
         self.assertEqual(second_kwargs["browser_profile"]["timezone_iana"], "Asia/Tokyo")
-        self.assertEqual(first_kwargs["fingerprint_seed"], second_kwargs["fingerprint_seed"])
-        self.assertTrue(str(first_kwargs["fingerprint_seed"]).startswith("live-check:user@example.com:"))
+        self.assertIsNone(first_kwargs["fingerprint_seed"])
+        self.assertIsNone(second_kwargs["fingerprint_seed"])
 
     def test_reuse_mode_uses_registration_seed_for_same_email(self):
         state = {}
@@ -172,7 +171,20 @@ class AccountLivenessTests(unittest.TestCase):
         with patch.object(liveness, "BrowserSession", return_value=session), \
              patch("config.register.PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL", True):
             liveness._new_fingerprint_pinned_session("user@example.com", "", state)
-        self.assertTrue(state["fingerprint_seed"].startswith("live-check:user@example.com:"))
+        self.assertEqual(state["fingerprint_seed"], "")
+
+    def test_fresh_live_check_uses_same_uuid4_shape_as_registration(self):
+        state = {}
+        with patch("config.register.PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL", False):
+            session = liveness._new_fingerprint_pinned_session(
+                "user@example.com", "", state,
+            )
+        try:
+            self.assertEqual(uuid.UUID(session.device_id).version, 4)
+            self.assertEqual(uuid.UUID(session.oai_session_id).version, 4)
+            self.assertEqual(uuid.UUID(session.auth_session_logging_id).version, 4)
+        finally:
+            session.close()
 
     def test_reauth_otp_dead_account_error_is_not_retried(self):
         response = SimpleNamespace(
