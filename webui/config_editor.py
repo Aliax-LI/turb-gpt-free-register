@@ -19,6 +19,9 @@ _CONFIG_DIR = _PROJECT_ROOT / "config"
 EXPLICIT_EMPTY_LIST_KEYS = {
     "PROXY_POOL",
 }
+EXPLICIT_EMPTY_STRING_KEYS = {
+    "GENERIC_API_PROXY",
+}
 
 
 # ============================================================
@@ -343,7 +346,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "GENERIC_API_PROXY", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
-        "label": "通用 API 取码代理", "help": "仅用于 generic_api 接口取码；默认直接走本地 HTTP 代理 http://127.0.0.1:7897，不读取代理池，也不套用代理池上游链式；留空则直连",
+        "label": "通用 API 取码代理", "help": "仅用于 generic_api 接口取码；不读取注册代理池，也不套用代理池上游链式；留空则直连，例如可填 http://127.0.0.1:7897",
         "storage": "env",
     },
     {
@@ -941,10 +944,16 @@ def get_config() -> list[dict]:
             raw_env_value = env_file_values[key]
             if field["type"] == "list_str_multiline" and key in EXPLICIT_EMPTY_LIST_KEYS and str(raw_env_value).strip() == "":
                 value = []
+            elif field["type"] == "str" and key in EXPLICIT_EMPTY_STRING_KEYS and str(raw_env_value).strip() == "":
+                value = ""
             else:
                 value = _coerce_raw_value(raw_env_value, fallback, field["type"])
         elif os.getenv(key) is not None:
-            value = _coerce_raw_value(os.getenv(key, ""), fallback, field["type"])
+            raw_env_value = os.getenv(key, "")
+            if field["type"] == "str" and key in EXPLICIT_EMPTY_STRING_KEYS and str(raw_env_value).strip() == "":
+                value = ""
+            else:
+                value = _coerce_raw_value(raw_env_value, fallback, field["type"])
         else:
             value = fallback
 
