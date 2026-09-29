@@ -6240,6 +6240,15 @@ function getAutoPlanCheckValue() {
   const fv = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, f.key) ? CONFIG_PENDING_UPDATES[f.key] : f.value;
   return !!fv;
 }
+function getProtocolFingerprintReuseField() {
+  return (CONFIG || []).find(f => f.key === 'PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL') || null;
+}
+function getProtocolFingerprintReuseValue() {
+  const f = getProtocolFingerprintReuseField();
+  if (!f) return false;
+  const fv = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, f.key) ? CONFIG_PENDING_UPDATES[f.key] : f.value;
+  return !!fv;
+}
 function registrationDriverLabel(value) {
   const cur = String(value || '').trim().toLowerCase();
   const hit = registrationDriverChoices().find(c => String(c.value) === cur);
@@ -6293,7 +6302,7 @@ function renderRegistrationDriverCard() {
     labelEl.textContent = label;
     labelEl.classList.toggle('is-placeholder', !label || label === '—');
   }
-  if (hintEl) hintEl.textContent = `驱动标识: ${cur} · 自动查套餐: ${getAutoPlanCheckValue() ? '开' : '关'}`;
+  if (hintEl) hintEl.textContent = `驱动标识: ${cur} · 自动查套餐: ${getAutoPlanCheckValue() ? '开' : '关'} · 协议指纹: ${getProtocolFingerprintReuseValue() ? '同邮箱保持' : '每次新建'}`;
 }
 function renderRegistrationDriverField(f) {
   return `
@@ -6307,11 +6316,15 @@ function renderRegistrationDriverField(f) {
 function renderRegistrationSettingsSection(fields) {
   const driver = fields.find(f => f.key === 'REGISTRATION_DRIVER') || fields[0];
   const autoPlan = fields.find(f => f.key === 'AUTO_PLAN_CHECK_AFTER_REGISTER');
+  const reuseFingerprint = fields.find(f => f.key === 'PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL');
   return `
     <div class="config-section-v2-body config-section-v2-body--single">
       ${driver ? renderRegistrationDriverField(driver) : '<div class="banner warn">未找到注册方式配置项</div>'}
     </div>
-    ${autoPlan ? `<div class="config-switches-v2" style="margin-top:14px;">${renderFeatureSwitchField(autoPlan, { withIcon: false })}</div>` : ''}
+    ${(autoPlan || reuseFingerprint) ? `<div class="config-switches-v2" style="margin-top:14px;">
+      ${autoPlan ? renderFeatureSwitchField(autoPlan, { withIcon: false }) : ''}
+      ${reuseFingerprint ? renderFeatureSwitchField(reuseFingerprint, { withIcon: false }) : ''}
+    </div>` : ''}
   `;
 }
 function renderFeatureSwitchField(f, opts = {}) {
@@ -6916,7 +6929,7 @@ function trackConfigFieldChange(e) {
   const f = CONFIG.find(x => x.key === el.dataset.key);
   if (!f) return;
   CONFIG_PENDING_UPDATES[f.key] = readConfigElementValue(el, f);
-  if (f.key === 'AUTO_PLAN_CHECK_AFTER_REGISTER') renderRegistrationDriverCard();
+  if (f.key === 'AUTO_PLAN_CHECK_AFTER_REGISTER' || f.key === 'PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL') renderRegistrationDriverCard();
 }
 $('#tab-config').addEventListener('input', trackConfigFieldChange);
 $('#tab-config').addEventListener('change', trackConfigFieldChange);
