@@ -651,6 +651,8 @@
       min-height: 32px !important; min-width: 0 !important; max-width: 48px;
     }
     .jobs-v2-pager .pager-goto input:focus { outline: none; border-color: #377DFF; }
+    .pager-bar .pager-goto { display:inline-flex; align-items:center; gap:5px; white-space:nowrap; }
+    .pager-bar .pager-goto input { width:58px; padding:6px 7px; border:1px solid var(--border); border-radius:7px; text-align:center; }
     .jobs-v2-pager button {
       min-height: 32px; height: 32px; border: 1px solid #dcdfe6; border-radius: 4px;
       background: #fff; color: #606266; font: inherit; font-size: 14px;
@@ -2663,7 +2665,12 @@ function _renderPager(id, total) {
     <button onclick="pagerGo('${id}',1)"${p.page >= totalPages ? ' disabled' : ''}>下一页 →</button>
     <select onchange="pagerSetSize('${id}',this.value)">${sizes.map(s =>
       `<option value="${s}"${p.size === s ? ' selected' : ''}>${s} 条/页</option>`
-    ).join('')}</select>`;
+    ).join('')}</select>
+    ${id === 'accounts' ? `<label class="pager-goto">前往
+      <input type="number" min="1" max="${totalPages}" value="${p.page}" inputmode="numeric"
+        onkeydown="if(event.key==='Enter'){pagerJump('${id}',this.value);event.preventDefault();}">
+      页 <button type="button" onclick="pagerJump('${id}',this.previousElementSibling.value)">跳转</button>
+    </label>` : ''}`;
   const el = document.getElementById('pager-' + id);
   if (el) el.innerHTML = html;
 
@@ -2704,9 +2711,8 @@ function _renderPager(id, total) {
         </div>
         <label class="pager-goto">前往
           <input type="number" min="1" max="${totalPages}" value="${p.page}" inputmode="numeric"
-            onkeydown="if(event.key==='Enter'){pagerJump('${id}',this.value);event.preventDefault();}"
-            onchange="pagerJump('${id}',this.value)">
-          页
+            onkeydown="if(event.key==='Enter'){pagerJump('${id}',this.value);event.preventDefault();}">
+          页 <button type="button" onclick="pagerJump('${id}',this.previousElementSibling.value)">跳转</button>
         </label>`;
     }
   }
