@@ -155,6 +155,25 @@ class AccountLivenessTests(unittest.TestCase):
         self.assertEqual(first_kwargs["fingerprint_seed"], second_kwargs["fingerprint_seed"])
         self.assertTrue(str(first_kwargs["fingerprint_seed"]).startswith("live-check:user@example.com:"))
 
+    def test_reuse_mode_uses_registration_seed_for_same_email(self):
+        state = {}
+        session = MagicMock()
+        session.browser_profile = {"navigator_language": "en-US"}
+        with patch.object(liveness, "BrowserSession", return_value=session), \
+             patch("config.register.PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL", True):
+            liveness._new_fingerprint_pinned_session("User@Example.com", "proxy", state)
+        self.assertEqual(state["fingerprint_seed"], "registration:user@example.com")
+        self.assertEqual(state["fingerprint_mode"], "registration_email_stable")
+
+    def test_direct_fallback_can_force_fresh_seed_in_reuse_mode(self):
+        state = {"force_fresh": True}
+        session = MagicMock()
+        session.browser_profile = {"navigator_language": "en-US"}
+        with patch.object(liveness, "BrowserSession", return_value=session), \
+             patch("config.register.PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL", True):
+            liveness._new_fingerprint_pinned_session("user@example.com", "", state)
+        self.assertTrue(state["fingerprint_seed"].startswith("live-check:user@example.com:"))
+
     def test_reauth_otp_dead_account_error_is_not_retried(self):
         response = SimpleNamespace(
             status_code=403,

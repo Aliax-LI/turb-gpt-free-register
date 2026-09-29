@@ -96,13 +96,14 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             )
             # BrowserSession 约定：None=从代理池抽取，""=明确直连。
             # 出口发生变化时必须重新按真实出口探测画像，不能把代理的 JP/VN
-            # 语言时区伪装到直连；因此直连兜底使用独立的任务身份状态。
+            # 语言时区伪装到直连；因此直连兜底强制使用全新任务身份，即使
+            # 已开启“同邮箱保持协议指纹”也不跨出口复用 device/session。
             result = check_account_liveness(
                 email,
                 proxy="",
                 clear_log=False,
                 email_source=email_source,
-                fingerprint_state={},
+                fingerprint_state={"force_fresh": True},
             )
         db.update_account_liveness(account_id, result)
         if result.get("ok"):
