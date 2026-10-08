@@ -19,6 +19,9 @@ _CONFIG_DIR = _PROJECT_ROOT / "config"
 EXPLICIT_EMPTY_LIST_KEYS = {
     "PROXY_POOL",
 }
+EXPLICIT_EMPTY_STRING_KEYS = {
+    "GENERIC_API_PROXY",
+}
 
 
 # ============================================================
@@ -54,6 +57,10 @@ EDITABLE_FIELDS = [
     {
         "key": "AUTO_PLAN_CHECK_AFTER_REGISTER", "file": "register.py", "type": "bool", "group": "注册方式",
         "label": "注册后自动查套餐", "help": "注册成功后自动入队查询套餐/Plus 资格；关闭后仅保存账号，不自动查套餐",
+    },
+    {
+        "key": "PROTOCOL_REUSE_FINGERPRINT_BY_EMAIL", "file": "register.py", "type": "bool", "group": "注册方式",
+        "label": "同邮箱保持协议指纹", "help": "仅影响纯协议注册；开启后同一邮箱重复任务复用稳定设备指纹，关闭后每次任务创建全新指纹",
     },
 
     # ---- CloakBrowser ----
@@ -221,6 +228,10 @@ EDITABLE_FIELDS = [
         "label": "打开接口路径", "help": "默认 /browser/open；如 Roxy 版本不同可在此调整",
     },
     {
+        "key": "ROXY_CREATE_INTERVAL", "file": "roxybrowser.py", "type": "float", "group": "RoxyBrowser",
+        "label": "创建环境间隔", "help": "多线程时相邻 /browser/create 请求的最小间隔，默认 1.5 秒；设为 0 可关闭",
+    },
+    {
         "key": "ROXY_OPEN_HEADLESS", "file": "roxybrowser.py", "type": "bool", "group": "RoxyBrowser",
         "label": "无头启动窗口", "help": "打开 Roxy 环境时向 /browser/open 传 headless；False=显示窗口，True=无头启动",
     },
@@ -289,6 +300,22 @@ EDITABLE_FIELDS = [
         "label": "启用 2FA(TOTP)", "help": "注册完成后自动设置动态口令（会多收一封 OTP 邮件）",
     },
     {
+        "key": "TWOFA_PROXY_MODE", "file": "twofa.py", "type": "str", "group": "功能开关",
+        "label": "2FA代理模式", "help": "saved=优先使用账号保存的代理；pool=忽略保存代理，每次从代理池随机取一个；修改后需重启服务",
+        "choices": [
+            {"value": "saved", "label": "使用账号保存的代理"},
+            {"value": "pool", "label": "每次从代理池随机获取"},
+        ],
+    },
+    {
+        "key": "TWOFA_WORKERS", "file": "twofa.py", "type": "int", "group": "功能开关",
+        "label": "2FA并发数", "help": "同时执行的2FA设置任务数，默认4，范围1-16；保存后立即生效",
+    },
+    {
+        "key": "TWOFA_QUEUE_LIMIT", "file": "twofa.py", "type": "int", "group": "功能开关",
+        "label": "2FA队列容量", "help": "允许排队和执行中的2FA任务总数，默认200；保存后立即生效",
+    },
+    {
         "key": "ENABLE_FLOW_TRIGGER", "file": "flow_trigger.py", "type": "bool", "group": "功能开关",
         "label": "启用 Flow 触发", "help": "注册成功后自动调用内部 Flow 接口（不影响注册结果）",
     },
@@ -341,6 +368,11 @@ EDITABLE_FIELDS = [
     {
         "key": "OTP_POLL_INTERVAL", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
         "label": "OTP 轮询间隔(秒)", "help": "每隔多少秒查一次新邮件",
+    },
+    {
+        "key": "GENERIC_API_PROXY", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "通用 API 取码代理", "help": "仅用于 generic_api 接口取码；不读取注册代理池，也不套用代理池上游链式；留空则直连，例如可填 http://127.0.0.1:7897",
+        "storage": "env",
     },
     {
         "key": "EMAIL_SOURCE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
@@ -547,6 +579,14 @@ EDITABLE_FIELDS = [
         "label": "代理池(每行一个)", "help": "每行一个代理 URL，留空行会被忽略；为空则不使用代理",
         "recommended_links": [
             {
+                "label": "IPWO 家宽",
+                "url": "https://www.ipwo.net/?code=XEP358YGZ",
+                "description": "IPWO 住宅代理提供覆盖195+国家和地区的住宅 IP 资源，支持多地区网络环境配置，适用于 AI 应用、浏览器自动化、海外服务访问及数据采集等场景。重点！2GB 动态住宅流量无门槛发放，",
+                "description_link_label": "领取入口",
+                "description_link_url": "https://www.ipwo.net/?code=XEP358YGZ",
+                "description_after_link": "，进群不定时 IP 福利发放。",
+            },
+            {
                 "label": "IPRocket 家宽",
                 "url": "https://iprocket.io?viteCode=1PVNyLuJ",
                 "description": "高性价比家宽，可通过 TG 联系作者购买流量",
@@ -557,6 +597,11 @@ EDITABLE_FIELDS = [
                 "description": "Roxy 合作伙伴高质量家宽，注册可享 15% 优惠",
             },
         ],
+    },
+    {
+        "key": "PROXY_POOL_UPSTREAM_PROXY", "file": "proxy.py", "type": "str", "group": "代理池",
+        "label": "代理池上游代理", "help": "可选；代理池每个目标代理通过此本地上游连接。留空则不链式。地址明文显示，仅保存到 .env",
+        "storage": "env",
     },
     {
         "key": "PROXY_STICKY_SESSION_PER_TASK", "file": "proxy.py", "type": "bool", "group": "代理池",
@@ -571,9 +616,14 @@ EDITABLE_FIELDS = [
         "label": "套餐/Agent网络模式", "help": "用于查套餐和生成 Agent Token；auto=本地代理可用则走代理、未监听则直连；proxy=强制代理；direct=强制直连",
     },
     {
-        "key": "PLAN_CHECK_PROXY", "file": "proxy.py", "type": "str", "group": "代理池",
-        "label": "套餐/Agent专用代理", "help": "用于查套餐和生成 Agent Token；留空时 auto/proxy 从代理池选择。可能包含认证信息，仅保存到 .env",
+        "key": "PLAN_CHECK_PROXY", "file": "proxy.py", "type": "list_str_multiline", "group": "代理池",
+        "label": "套餐/Agent专用代理(每行一个)", "help": "用于查套餐、查活和生成 Agent Token；支持动态代理 URL，每行一条。仅保存到 .env",
         "storage": "env", "secret": True,
+    },
+    {
+        "key": "PLAN_CHECK_UPSTREAM_PROXY", "file": "proxy.py", "type": "str", "group": "代理池",
+        "label": "套餐/Agent本地上游代理", "help": "可选；仅用于套餐/Agent专用代理，形成“本地代理 -> 动态代理 -> ChatGPT”的代理链。留空则不链式。地址明文显示。仅保存到 .env",
+        "storage": "env",
     },
     {
         "key": "PLAN_CHECK_TIMEOUT", "file": "proxy.py", "type": "float", "group": "代理池",
@@ -581,7 +631,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "PLAN_CHECK_MAX_ATTEMPTS", "file": "proxy.py", "type": "int", "group": "代理池",
-        "label": "套餐/Agent最大尝试次数", "help": "查套餐和生成 Agent Token 遇到网络错误、429、5xx 等临时错误时的重试次数，建议 2 次",
+        "label": "套餐/Agent最大尝试次数", "help": "查套餐和生成 Agent Token 遇到 403、429、5xx 或网络错误时的重试次数，建议 3 次",
     },
     {
         "key": "PLAN_CHECK_RETRY_DELAY", "file": "proxy.py", "type": "float", "group": "代理池",
@@ -680,15 +730,19 @@ EDITABLE_FIELDS = [
 
     {
         "key": "SMS_PROVIDER", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "接码通道", "help": "grizzly / l / h；l 使用 L_API.md，h 使用 H_API.md 定义的本地取号服务",
+        "label": "接码通道", "help": "grizzly / smsbower / l / h；smsbower 使用 SMSBower handler_api，l/h 使用本地取号服务",
     },
     {
         "key": "SMS_COUNTRY", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "国家代码", "help": "传给接码平台的 country；GrizzlySMS 常用：美国=187；H 通道作为 H_API.md 的 country",
+        "label": "国家代码", "help": "传给接码平台的 country；SMSBower 按其国家表填写，GrizzlySMS 常用美国=187；H 通道作为 H_API.md 的 country",
     },
     {
         "key": "SMS_SERVICE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "服务/项目代码", "help": "GrizzlySMS/L 作为 service；H 通道作为 H_API.md 的 projectId",
+        "label": "服务/项目代码", "help": "GrizzlySMS/L/SMSBower 作为 service；SMSBower 的 OpenAI (ChatGPT) 推荐填 dr，填 openai/chatgpt 时程序会自动转换；H 通道作为 projectId",
+    },
+    {
+        "key": "SMS_MAX_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "最高号码价格", "help": "透传给接码平台的 maxPrice；留空不限。SMSBower 可用它筛选价格/号码等级",
     },
     {
         "key": "SMS_MAX_RETRIES", "file": "codex.py", "type": "int", "group": "接码平台",
@@ -702,6 +756,35 @@ EDITABLE_FIELDS = [
         "key": "SMS_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "GrizzlySMS API密钥", "help": "GrizzlySMS 平台 API Key，保存在 .env（SMS_API_KEY），不写回 config/*.py",
         "storage": "env", "secret": True,
+    },
+    {
+        "key": "SMSBOWER_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower API 地址", "help": "默认 https://smsbower.page/stubs/handler_api.php",
+    },
+    {
+        "key": "SMSBOWER_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower API密钥", "help": "SMSBower 控制台 API Key，保存在 .env，不写回 config/*.py",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "SMSBOWER_USE_V2", "file": "codex.py", "type": "bool", "group": "接码平台",
+        "label": "SMSBower 使用V2取号", "help": "官方客户端文档使用 getNumber；通常保持关闭。仅在确认账号支持 getNumberV2 时开启",
+    },
+    {
+        "key": "SMSBOWER_PROVIDER_IDS", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower 供应商筛选", "help": "可选，供应商 ID 用逗号分隔；留空由平台自动选择",
+    },
+    {
+        "key": "SMSBOWER_EXCEPT_PROVIDER_IDS", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower 排除供应商", "help": "可选，排除的供应商 ID 用逗号分隔",
+    },
+    {
+        "key": "SMSBOWER_PHONE_EXCEPTION", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower 排除号码前缀", "help": "可选，号码前缀用逗号分隔；用于避开已知不可用号段",
+    },
+    {
+        "key": "SMSBOWER_MIN_PRICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMSBower 最低价格", "help": "可选，透传 minPrice；与最高价格一起限定号码价格区间",
     },
     {
         "key": "H_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
@@ -894,10 +977,16 @@ def get_config() -> list[dict]:
             raw_env_value = env_file_values[key]
             if field["type"] == "list_str_multiline" and key in EXPLICIT_EMPTY_LIST_KEYS and str(raw_env_value).strip() == "":
                 value = []
+            elif field["type"] == "str" and key in EXPLICIT_EMPTY_STRING_KEYS and str(raw_env_value).strip() == "":
+                value = ""
             else:
                 value = _coerce_raw_value(raw_env_value, fallback, field["type"])
         elif os.getenv(key) is not None:
-            value = _coerce_raw_value(os.getenv(key, ""), fallback, field["type"])
+            raw_env_value = os.getenv(key, "")
+            if field["type"] == "str" and key in EXPLICIT_EMPTY_STRING_KEYS and str(raw_env_value).strip() == "":
+                value = ""
+            else:
+                value = _coerce_raw_value(raw_env_value, fallback, field["type"])
         else:
             value = fallback
 
@@ -1020,16 +1109,24 @@ def _atomic_write(path: Path, text: str) -> None:
     tmp.replace(path)
 
 
-def _format_env_value(value, vtype: str) -> str:
+def _format_env_value(value, vtype: str, fallback=None) -> str:
     """把前端值格式化成适合写入 .env 的字符串。"""
+    if value is None:
+        value = fallback
     if vtype == "bool":
         if isinstance(value, str):
             value = value.strip().lower() in ("true", "1", "yes", "on", "y")
         return "True" if value else "False"
     if vtype == "int":
-        return str(int(value))
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):
+            return str(int(fallback)) if fallback is not None else "0"
     if vtype == "float":
-        return repr(float(value))
+        try:
+            return repr(float(value))
+        except (TypeError, ValueError):
+            return repr(float(fallback)) if fallback is not None else "0.0"
     if vtype == "list_str_multiline":
         lines = _normalize_config_value(value, vtype)
         return "\n".join(lines) if lines else "[]"
@@ -1044,13 +1141,26 @@ def update_config(updates: dict) -> dict:
 
     updated, ignored = [], []
     env_updates: dict[str, str] = {}
+    current_values = {
+        item["key"]: item.get("value")
+        for item in get_config()
+    }
 
     for key, value in updates.items():
         field = _FIELD_BY_KEY.get(key)
         if field is None:
             ignored.append(key)
             continue
-        env_updates[key] = _format_env_value(value, field["type"])
+        choices = field.get("choices") or []
+        if choices:
+            allowed = {str(item.get("value")) for item in choices}
+            if str(value) not in allowed:
+                raise ValueError(f"{key} 的值无效，可选：{', '.join(sorted(allowed))}")
+        env_updates[key] = _format_env_value(
+            value,
+            field["type"],
+            fallback=current_values.get(key),
+        )
         updated.append(key)
 
 

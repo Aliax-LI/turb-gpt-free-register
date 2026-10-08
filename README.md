@@ -19,6 +19,13 @@ ChatGPT / OpenAI 账号自动注册与 Codex OAuth 授权工具。当前项目�
 
 ---
 
+## 特别鸣谢
+
+[![IPWO 住宅代理](https://raw.githubusercontent.com/myfanhua/turb-gpt-free-register/main/static/telegram-cloud-photo-size-5-6154589162401632962-y.jpg)](https://www.ipwo.net/?code=XEP358YGZ)
+
+IPWO 住宅代理提供覆盖195+国家和地区的住宅 IP 资源，支持多地区网络环境配置，适用于 AI 应用、浏览器自动化、海外服务访问及数据采集等场景。
+重点！2GB 动态住宅流量无门槛发放，[领取入口](https://www.ipwo.net/?code=XEP358YGZ)，进群不定时 IP 福利发放。
+
 ## 功能概览
 
 ### 注册
@@ -87,7 +94,7 @@ EMAIL_SOURCE = "outlook,generic_api,imap"
 - 实时查看任务日志。
 - 动态调整注册线程数，提交后新任务立即使用最新值。
 - 批量补跑 Codex，补跑线程数每次提交即时生效。
-- 管理账号、邮箱池、Codex 凭证；账号页支持复制全部/选中整行，邮箱池列表展示导入时间、已用时间和状态。
+- 管理账号、邮箱池、Codex 凭证；账号页支持单个/批量换绑邮箱并指定新邮箱来源，换绑后同时展示原邮箱与当前邮箱，支持查看换绑日志，并自动查活刷新 AT。
 - 邮箱池导入默认不创建账号；勾选“导入后默认视为注册成功账号”后，会将邮箱池标记为已用并同步显示在账号页，可直接批量补跑 Codex。
 - Roxy/Cloak 浏览器注册完成后统计整个浏览器会话的上传、下载和总流量，任务列表与账号扩展信息均会保存结果；Browser Use/Skyvern 云端浏览器不启用本地流量监听、资源拦截或 JS 覆盖率采集。
 - 配置页支持热加载，保存后无需重启。
@@ -118,7 +125,7 @@ EMAIL_SOURCE = "outlook,generic_api,imap"
 BROWSER_DATA_SAVER_MODE=True
 BROWSER_DATA_SAVER_BLOCKED_RESOURCE_TYPES=["image", "media"]
 # URL glob 列表；WebUI 中则是一行一条
-BROWSER_DATA_SAVER_BLOCKED_URL_PATTERNS='["**://auth.openai.com/awe/api/v2/rum**", "**://chatgpt.com/ces/statsc/flush**", "**://connect.facebook.net/**", "**://analytics.tiktok.com/**", "**://snap.licdn.com/**", "**://bat.bing.com/**", "**://accounts.google.com/gsi/client**"]'
+BROWSER_DATA_SAVER_BLOCKED_URL_PATTERNS='["**://auth.openai.com/awe/api/v2/rum**", "**://chatgpt.com/awe/api/v2/rum**", "**://chatgpt.com/ces/statsc/flush**", "**://connect.facebook.net/**", "**://analytics.tiktok.com/**", "**://snap.licdn.com/**", "**://bat.bing.com/**", "**://accounts.google.com/gsi/client**"]'
 ```
 
 Roxy/Selenium 会在启动参数中关闭图片加载，并使用 Chrome CDP 拦截常见图片、媒体等 URL 后缀及配置的 URL glob（因此也能覆盖无扩展名资源）；Cloak 使用 Playwright 按资源类型和 URL glob 拦截。Browser Use/Skyvern 是云端浏览器，不安装本地省流量拦截器，始终保留完整页面资源。默认只拦截 `image`、`media`，以及配置中列出的 RUM/广告统计 URL，不会按类型拦截登录所需的核心脚本、接口和 WebSocket。Playwright 会放行带验证码/challenge 关键词的 URL；Roxy 的 Chromium 图片开关和 CDP URL 黑名单无法提供 URL 例外规则，若页面出现验证码或布局异常，关闭该模式后重试。
@@ -183,8 +190,32 @@ Roxy/Selenium 会在当前 Chrome target 上启用 CDP `Profiler.startPreciseCov
 安装依赖：
 
 ```bash
-pip install -r requirements.txt
+# 推荐使用项目虚拟环境，不要直接使用系统 pip
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements.txt
 node --version
+```
+
+启动 WebUI 时，`webui.sh` 会优先使用 `.venv/bin/python`：
+
+```bash
+./webui.sh start
+```
+
+如果 macOS 升级或卸载了创建虚拟环境时使用的 Python，旧 `.venv` 中的 Python 软链接可能失效。此时请使用当前已安装的 Python 重新创建环境：
+
+```bash
+rm -rf .venv
+python3.12 -m venv .venv   # 也可以替换为当前已安装的 Python 3.10+
+.venv/bin/python -m pip install -r requirements.txt
+./webui.sh start
+```
+
+验证当前 WebUI 使用的解释器和 Flask：
+
+```bash
+.venv/bin/python -c 'import sys, flask; print(sys.executable); print(flask.__version__)'
 ```
 
 ### 密钥配置（.env）
@@ -450,7 +481,10 @@ CLOAK_USER_DATA_DIR = ""        # 留空临时环境；填路径可持久化 pro
 REGISTRATION_DRIVER = "protocol"
 ```
 
-协议注册会使用 `curl_cffi`、Sentinel/PoW、代理池等配置。
+协议注册会使用 `curl_cffi`、Sentinel/PoW、代理池等配置，并强制走
+`create-account/password` 邮箱密码注册流程。注册密码与浏览器驱动一致：
+优先使用 `config/register.py` 的 `REGISTER_PASSWORD`，未配置时随机生成，
+并保存到账号的 `extra_json.registration_password`。
 
 #### 使用 Browser Use Cloud 注册
 
