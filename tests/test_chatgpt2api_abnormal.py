@@ -74,10 +74,23 @@ class ChatGPT2ApiAbnormalTests(unittest.TestCase):
         self.assertFalse(out["handled"])
         delete.assert_not_called()
 
-    def test_untracked_account_is_ignored(self):
-        with patch.object(chatgpt2api_sync, "delete_accounts") as delete:
+    def test_untracked_account_is_ignored_when_sync_disabled(self):
+        with patch.object(chatgpt2api_sync._cfg, "ENABLE_CHATGPT2API_SYNC", False), \
+             patch.object(chatgpt2api_sync, "delete_accounts") as delete:
             self.assertIsNone(chatgpt2api_sync.handle_live_check_finished(999, {"ok": True, "access_token": _NEW_TOKEN}))
         delete.assert_not_called()
+
+    def test_untracked_account_syncs_when_sync_enabled(self):
+        with patch.object(chatgpt2api_sync._cfg, "ENABLE_CHATGPT2API_SYNC", True), \
+             patch.object(chatgpt2api_sync._cfg, "CHATGPT2API_BEARER", "admin-token"), \
+             patch.object(chatgpt2api_sync, "sync_account", return_value={"ok": True, "status": "success"}) as sync, \
+             patch.object(chatgpt2api_sync, "delete_accounts", return_value={"ok": True, "status": "success"}) as delete:
+            out = chatgpt2api_sync.handle_live_check_finished(
+                999, {"ok": True, "status": "live", "access_token": _NEW_TOKEN}, previous_token=_OLD_TOKEN
+            )
+        self.assertTrue(out["handled"])
+        sync.assert_called_once_with(_NEW_TOKEN, force=True)
+        delete.assert_called_once_with([_OLD_TOKEN])
 
     def test_delete_requires_bearer(self):
         with patch.object(chatgpt2api_sync._cfg, "CHATGPT2API_BEARER", ""):

@@ -338,6 +338,87 @@ class AccountLivenessTests(unittest.TestCase):
         self.assertEqual(check.call_args.kwargs["proxy"], proxy_url)
         self.assertTrue(slot.released)
 
+    def test_account_with_password_and_valid_at_uses_reauth_email_otp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _DummyBrowserSession(proxy="")
+            fresh_info = {
+                "accessToken": "fresh-token",
+                "user": {"id": "user-pwd"},
+                "account": {"planType": "free"},
+            }
+            with patch.object(liveness, "_LOG_DIR", Path(tmp)), \
+                 patch.object(liveness, "_stored_access_token", return_value="old-valid-token"), \
+                 patch.object(liveness, "_is_jwt_expired", return_value=False), \
+                 patch.object(liveness, "_account_registration_password", return_value="Password123!"), \
+                 patch.object(liveness, "_account_totp_secret", return_value=""), \
+                 patch.object(liveness, "_login_via_reauth", return_value=fresh_info) as reauth, \
+                 patch.object(liveness, "_login_via_full_web_flow") as full_login:
+                result = liveness.check_account_liveness("pwd-user@example.com", proxy="")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["access_token"], "fresh-token")
+        # 查活统一走邮箱接码：有有效 AT 时走 reauth 邮箱接码，不走密码直登
+        reauth.assert_called_once()
+        full_login.assert_not_called()
+
+    def test_password_or_otp_delegates_to_email_otp_without_password_verify(self):
+        session = _DummyBrowserSession(proxy="")
+        with patch.object(liveness, "_password_verify") as pwd_mock, \
+             patch.object(liveness, "_login_via_email_otp", return_value={"accessToken": "otp-token"}) as email_otp:
+            result = liveness._login_via_password_or_otp(
+                session, "test@example.com", 100.0, email_source="remail"
+            )
+        self.assertEqual(result["accessToken"], "otp-token")
+        pwd_mock.assert_not_called()
+        email_otp.assert_called_once_with(
+            session, "test@example.com", 100.0, email_source="remail", referer="https://auth.openai.com/email-verification"
+        )
+
+    def test_login_via_email_otp_explicitly_sends_email_otp(self):
+        session = _DummyBrowserSession(proxy="")
+        with patch.object(liveness, "send_email_otp") as send_mock, \
+             patch.object(liveness, "_validate_with_retry", return_value={"continue_url": "https://auth.example/continue"}) as val_mock, \
+             patch.object(liveness, "_follow_continue_and_fetch", return_value={"accessToken": "at-123"}):
+            result = liveness._login_via_email_otp(
+                session, "user@example.com", 50.0, referer="https://auth.openai.com/log-in/password"
+            )
+        self.assertEqual(result["accessToken"], "at-123")
+        send_mock.assert_called_once_with(session, referer="https://auth.openai.com/log-in/password")
+
+    def test_login_via_reauth_explicitly_sends_email_otp(self):
+        session = _DummyBrowserSession(proxy="")
+        with patch.object(liveness, "_trigger_reauth_with_retry", return_value="https://chatgpt.com/auth/reauth"), \
+             patch.object(liveness, "human_delay"), \
+             patch.object(liveness, "_follow_reauth_with_retry", return_value="https://auth.openai.com/email-verification"), \
+             patch.object(liveness, "send_email_otp") as send_mock, \
+             patch.object(liveness, "_validate_reauth_with_retry", return_value="https://auth.example/continue"), \
+             patch.object(liveness, "_follow_continue_and_fetch", return_value={"accessToken": "at-456"}):
+            result = liveness._login_via_reauth(session, "user@example.com", 50.0)
+        self.assertEqual(result["accessToken"], "at-456")
+        send_mock.assert_called_once_with(session, referer="https://auth.openai.com/email-verification")
+
+    def test_expired_access_token_bypasses_reauth_to_full_web_flow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = _DummyBrowserSession(proxy="")
+            fresh_info = {
+                "accessToken": "fresh-token",
+                "user": {"id": "user-expired"},
+                "account": {"planType": "free"},
+            }
+            with patch.object(liveness, "_LOG_DIR", Path(tmp)), \
+                 patch.object(liveness, "_stored_access_token", return_value="expired-token"), \
+                 patch.object(liveness, "_is_jwt_expired", return_value=True), \
+                 patch.object(liveness, "_account_registration_password", return_value=""), \
+                 patch.object(liveness, "_account_totp_secret", return_value=""), \
+                 patch.object(liveness, "_login_via_reauth") as reauth, \
+                 patch.object(liveness, "_login_via_full_web_flow", return_value=(session, fresh_info)) as full_login:
+                result = liveness.check_account_liveness("no-pwd@example.com", proxy="")
+
+        self.assertTrue(result["ok"])
+        # AT 过期时不尝试无效的 reauth，直接走完整 Web 流程
+        reauth.assert_not_called()
+        full_login.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -36,6 +36,9 @@ def _configured_live_check_proxies(proxy_cfg) -> list[str]:
 
 
 def _live_proxy_route(proxy_url: str, proxy_cfg) -> dict:
+    sticky_fn = getattr(proxy_cfg, "_proxy_with_task_sticky_session", None)
+    if callable(sticky_fn):
+        proxy_url = sticky_fn(proxy_url)
     route = resolve_plan_check_route(explicit_proxy=proxy_url)
     upstream = str(getattr(proxy_cfg, "PLAN_CHECK_UPSTREAM_PROXY", "") or "").strip()
     if upstream:
@@ -69,10 +72,10 @@ def _append_log(email: str, line: str, *, clear: bool = False) -> None:
         f.write(f"{stamp} [INFO] {line}\n")
 
 
-def _sync_chatgpt2api(account_id: int, email: str, result: dict) -> None:
-    """查活结束后处理 ChatGPT2API 旧账号；失败只记日志，不影响查活结果。"""
+def _sync_chatgpt2api(account_id: int, email: str, result: dict, previous_token: str | None = None) -> None:
+    """查活结束后处理 ChatGPT2API 旧账号与新 token 同步；失败只记日志，不影响查活结果。"""
     try:
-        synced = chatgpt2api_sync.handle_live_check_finished(account_id, result)
+        synced = chatgpt2api_sync.handle_live_check_finished(account_id, result, previous_token=previous_token)
     except Exception as exc:
         logger.exception("[ChatGPT2API] 查活后同步异常: account_id=%s", account_id)
         _append_log(email, f"[ChatGPT2API] 同步异常：{type(exc).__name__}: {str(exc)[:160]}")
@@ -115,6 +118,7 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             account = db.get_account(account_id) or {}
         except Exception:
             account = {}
+        previous_token = str(account.get("access_token") or "").strip() or None
         email_source = str(account.get("email_source") or "").strip() or None
         if email_source:
             _append_log(email, f"[查活] 使用注册时保存的邮箱来源：{email_source}")
@@ -166,6 +170,24 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
                 route = _live_proxy_route(next_proxy, proxy_cfg)
                 continue
 
+            # 当池中已无未使用的代理地址，但开启了粘性会话时，重新生成新会话出口重试
+            sticky_fn = getattr(proxy_cfg, "_proxy_with_task_sticky_session", None)
+            if (
+                candidates
+                and route_attempt < max_routes
+                and callable(sticky_fn)
+                and selected_proxy
+                and sticky_fn(selected_proxy) != selected_proxy
+            ):
+                next_proxy = random.choice(candidates)
+                _append_log(
+                    email,
+                    "[查活] 当前代理发生网络/403错误，为动态代理生成新粘性会话出口重试："
+                    f"{_mask_proxy(next_proxy)}",
+                )
+                route = _live_proxy_route(next_proxy, proxy_cfg)
+                continue
+
             if candidates:
                 break
 
@@ -192,7 +214,7 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
             "proxy_mode": route.get("proxy_mode"),
             "proxy_fallback_reason": route.get("proxy_fallback_reason"),
         })
-        _sync_chatgpt2api(account_id, email, result)
+        _sync_chatgpt2api(account_id, email, result, previous_token=previous_token)
         return result
     except Exception as exc:
         result = {

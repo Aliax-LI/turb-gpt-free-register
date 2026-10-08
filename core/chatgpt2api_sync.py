@@ -190,15 +190,28 @@ def scan_abnormal_accounts() -> dict:
     }
 
 
-def handle_live_check_finished(account_id: int, result: dict | None = None) -> dict | None:
+def handle_live_check_finished(
+    account_id: int,
+    result: dict | None = None,
+    previous_token: str | None = None,
+) -> dict | None:
     """查活结束后同步 ChatGPT2API：成功=导入新 token 并删旧号，已废=只删旧号。
 
     其他失败（网络/CF 拦截等）不动远端账号，旧 token 继续保留以便重新查活。
-    只处理点过「C2A异常」筛选、记录过旧 token 的账号。
+    开启 ENABLE_CHATGPT2API_SYNC 或账号记录过旧 token 时均执行同步。
     """
     old_tokens = _old_tokens(account_id)
-    if not old_tokens:
+    if not old_tokens and previous_token:
+        old_tokens = [previous_token]
+
+    sync_enabled = bool(getattr(_cfg, "ENABLE_CHATGPT2API_SYNC", False))
+    has_tracked_tokens = bool(_old_tokens(account_id))
+
+    if not sync_enabled and not has_tracked_tokens:
         return None
+
+    if not getattr(_cfg, "CHATGPT2API_BEARER", ""):
+        return {"handled": False, "reason": "CHATGPT2API_BEARER 为空"}
 
     result = result or {}
     status = str(result.get("status") or "").strip()
@@ -213,9 +226,14 @@ def handle_live_check_finished(account_id: int, result: dict | None = None) -> d
     }
     # 导入失败时不能删旧号，否则远端会一个可用账号都不剩。
     if new_token and not imported.get("ok"):
-        return {"handled": False, "imported": imported, "reason": "导入新 token 失败，保留旧账号"}
+        return {"handled": False, "imported": imported, "reason": f"导入新 token 失败（{imported.get('message') or '-'}），保留旧账号"}
 
-    deleted = delete_accounts([t for t in old_tokens if t != new_token])
+    tokens_to_delete = [t for t in old_tokens if t and t != new_token]
+    deleted = delete_accounts(tokens_to_delete) if tokens_to_delete else {
+        "status": "skipped",
+        "ok": True,
+        "message": "无旧账号需要删除",
+    }
     if deleted.get("ok"):
         forget_old_tokens(account_id)
     logger.info(

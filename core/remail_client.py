@@ -129,7 +129,10 @@ def _request(
 
     ``authenticated=False`` 仅用于 pickup 接口。服务 token 不写入日志和异常文本。
     """
-    request_headers = {"Accept": "application/json"}
+    request_headers = {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+    }
     if authenticated:
         request_headers.update(_auth_headers())
     if headers:
@@ -145,6 +148,22 @@ def _request(
             headers=request_headers,
             timeout=_request_timeout(),
         )
+    except (requests.exceptions.SSLError, requests.exceptions.ProxyError, requests.exceptions.ConnectionError) as net_exc:
+        # 当本地系统代理（如 macOS 127.0.0.1:12450）出现 SSL/连接异常时，绕过环境代理直连重试一次
+        logger.debug("[Remail] 请求遇网络/代理异常，尝试绕过环境代理直连: %s: %s", type(net_exc).__name__, net_exc)
+        try:
+            with requests.Session() as s:
+                s.trust_env = False
+                response = s.request(
+                    method.upper(),
+                    url,
+                    params=params,
+                    json=json_body,
+                    headers=request_headers,
+                    timeout=_request_timeout(),
+                )
+        except requests.RequestException as exc:
+            raise RemailError(f"Remail 请求失败 ({method.upper()} {path}): {type(exc).__name__}: {exc}") from exc
     except requests.RequestException as exc:
         raise RemailError(f"Remail 请求失败 ({method.upper()} {path}): {type(exc).__name__}: {exc}") from exc
 
@@ -741,6 +760,21 @@ def fetch_latest_otp(
 
     if best_otp:
         return best_otp
+    # 兜底：若因时间戳轻微偏差导致 after_ts 过滤后为空，尝试提取最近 10 分钟内的最新验证码
+    try:
+        now_ts = time.time()
+        for message in items:
+            received_at = _first_value(
+                message, "receivedAt", "received_at", "timestamp", "createdAt", "created_at"
+            )
+            timestamp = _parse_timestamp(received_at)
+            if timestamp is not None and (now_ts - timestamp) <= 600:
+                fallback_code = _message_code(message)
+                if fallback_code:
+                    logger.info("[Remail] 宽松兜底：采用 10 分钟内最新验证码")
+                    return fallback_code
+    except Exception:
+        pass
     raise RemailError(f"等待 Remail 验证码超时: {target}; {last_error}")
 
 
