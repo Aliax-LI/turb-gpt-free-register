@@ -58,6 +58,114 @@ class AccountInspectionTests(unittest.TestCase):
         lease_patch.start()
         self.addCleanup(lease_patch.stop)
 
+    def test_live_failure_details_capture_rejection_exception_and_account_snapshot(self):
+        run, _ = db.create_account_inspection([2, 3, 4], workers=1)
+        def enqueue(**kwargs):
+            if kwargs['account_id'] == 2:
+                return {'accepted': False, 'error': '该账号正在查活'}
+            if kwargs['account_id'] == 3:
+                raise RuntimeError('mailbox unavailable')
+            future = Future()
+            future.set_result({'ok': False, 'status': 'deactivated', 'error': 'account_deactivated'})
+            return {'accepted': True, 'future': future}
+        with patch.object(service.live_check_service, 'enqueue_account_live_check', side_effect=enqueue), \
+             patch.object(service.logger, 'exception'):
+            service._run(run)
+        details = db.list_account_inspection_failures(run['id'])
+        self.assertTrue(details['details_available'])
+        self.assertEqual(details['total'], run['live_failed_count'])
+        self.assertEqual(details['total'], 3)
+        records = {r['account_id']: r for r in details['items']}
+        self.assertEqual(records[2]['status'], 'rejected')
+        self.assertEqual(records[3]['error'], 'RuntimeError: mailbox unavailable')
+        self.assertEqual(records[4]['status'], 'deactivated')
+        self.assertTrue(all(r['failed_at'] for r in records.values()))
+        db.update_account_liveness(2, {'ok': True, 'access_token': 'new-token'})
+        db.delete_accounts([3, 4])
+        db._SQLITE_READY = False
+        db._ensure_sqlite()
+        self.assertEqual(db.list_account_inspection_failures(run['id'])['items'], details['items'])
+        self.assertNotIn('access_token', str(details))
+        self.assertNotIn('account_ids', details['task'])
+
+    def test_failure_detail_and_statistics_roll_back_together_and_terminal_is_immutable(self):
+        run, _ = db.create_account_inspection([2])
+        failure = {'account_id': 2, 'email': 'old@example.test', 'error': 'test failure'}
+        with closing(db._sqlite_conn()) as conn, conn:
+            conn.executescript("""
+                CREATE TRIGGER fail_failure_detail BEFORE INSERT ON account_inspection_failures
+                BEGIN SELECT RAISE(ABORT, 'detail storage failure'); END;
+            """)
+        run.update(status='running', checked_count=1, invalid_count=1, live_failed_count=1)
+        with self.assertRaisesRegex(Exception, 'detail storage failure'):
+            db.save_account_inspection(run, failure=failure)
+        details = db.list_account_inspection_failures(run['id'])
+        self.assertEqual(details['total'], 0)
+        self.assertEqual(details['task']['live_failed_count'], 0)
+        self.assertEqual(details['task']['status'], 'queued')
+        with closing(db._sqlite_conn()) as conn, conn:
+            conn.execute('DROP TRIGGER fail_failure_detail')
+        self.assertTrue(db.save_account_inspection(run, failure=failure))
+        self.assertTrue(db.save_account_inspection(run, failure=failure))
+        self.assertEqual(db.list_account_inspection_failures(run['id'])['total'], 1)
+        run['status'] = 'completed'
+        db.save_account_inspection(run)
+        self.assertFalse(db.save_account_inspection(run, failure={'account_id': 3, 'error': 'late result'}))
+        self.assertEqual(db.list_account_inspection_failures(run['id'])['total'], 1)
+
+    def test_detail_write_failure_does_not_leave_unmatched_count_in_final_save(self):
+        run, _ = db.create_account_inspection([2])
+        with closing(db._sqlite_conn()) as conn, conn:
+            conn.executescript("""
+                CREATE TRIGGER fail_failure_detail BEFORE INSERT ON account_inspection_failures
+                BEGIN SELECT RAISE(ABORT, 'detail storage failure'); END;
+            """)
+        with patch.object(service.live_check_service, 'enqueue_account_live_check', return_value=completed(False)), \
+             patch.object(service.logger, 'exception'):
+            service._run(run)
+        result = db.list_account_inspection_failures(run['id'])
+        self.assertEqual(result['task']['status'], 'failed')
+        self.assertIn('detail storage failure', result['task']['error'])
+        self.assertEqual(result['task']['live_failed_count'], 0)
+        self.assertEqual(result['total'], 0)
+
+    def test_failure_details_api_pagination_auth_and_legacy_history(self):
+        app = create_app(auth_code='details-test')
+        client = app.test_client()
+        headers = {'X-Auth-Code': 'details-test', 'Accept-Encoding': 'identity'}
+        run, _ = db.create_account_inspection(list(range(1, 26)))
+        run['status'] = 'running'
+        for i in range(1, 26):
+            run.update(checked_count=i, invalid_count=i, live_failed_count=i)
+            db.save_account_inspection(run, failure={'account_id': i, 'email': f'{i}@example.test', 'error': f'failure-{i}'})
+        url = f"/api/accounts/inspections/{run['id']}/failures"
+        self.assertEqual(client.get(url).status_code, 401)
+        page1 = client.get(url, headers=headers).get_json()
+        self.assertEqual(len(page1['items']), 20)
+        self.assertEqual(page1['total'], 25)
+        page2 = client.get(url + '?page=2', headers=headers).get_json()
+        self.assertEqual([r['account_id'] for r in page2['items']], [21, 22, 23, 24, 25])
+        self.assertEqual(client.get(url + '?page=bad', headers=headers).status_code, 400)
+        self.assertEqual(client.get(url + '?page=0', headers=headers).status_code, 400)
+        self.assertEqual(client.get(url + '?page=' + '9'*100, headers=headers).status_code, 400)
+        self.assertEqual(client.get('/api/accounts/inspections/999999/failures', headers=headers).status_code, 404)
+        run['status'] = 'completed'
+        db.save_account_inspection(run)
+        legacy, _ = db.create_account_inspection([2])
+        legacy.pop('failure_details_available')
+        legacy.update(status='completed', live_failed_count=1)
+        db.save_account_inspection(legacy)
+        result = db.list_account_inspection_failures(legacy['id'])
+        self.assertFalse(result['details_available'])
+        self.assertEqual(result['items'], [])
+
+    def test_plan_failure_does_not_create_live_failure_record(self):
+        run, _ = db.create_account_inspection([2])
+        with patch.object(service.live_check_service, 'enqueue_account_live_check', return_value=completed(True, False)):
+            service._run(run)
+        self.assertEqual(run['plan_failed_count'], 1)
+        self.assertEqual(db.list_account_inspection_failures(run['id'])['total'], 0)
+
     def test_idle_history_poll_does_not_wait_for_unrelated_writer(self):
         run, _ = db.create_account_inspection([1])
         run.update(status='completed', checked_count=1)
@@ -1239,6 +1347,7 @@ print('acquired' if lease else 'busy', flush=True)
                 self.assertEqual(run['plan_success_count'], sum(i % 3 != 0 for i in success_ids))
                 self.assertEqual(run['plan_failed_count'], sum(i % 3 == 0 for i in success_ids))
                 self.assertIsNone(db.list_account_inspections()['active'])
+                self.assertEqual(db.list_account_inspection_failures(run['id'])['total'], run['live_failed_count'])
                 for account_id in ids:
                     self.assertNotIn(account_id, module._RUNNING)
                     self.assertNotIn(account_id, plan_service._RUNNING)

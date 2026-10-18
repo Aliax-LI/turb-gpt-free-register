@@ -45,7 +45,7 @@ def _check_live(account: dict, executor: ThreadPoolExecutor) -> dict:
         trigger="inspection", return_future=True, executor=executor,
     )
     if not queued.get("accepted"):
-        return {"ok": False, "error": queued.get("error") or "查活入队被拒绝"}
+        return {"ok": False, "status": "rejected", "error": queued.get("error") or "查活入队被拒绝"}
     return queued["future"].result()
 
 
@@ -70,15 +70,22 @@ def _run(run: dict) -> None:
     stats_lock = threading.Lock()
     stopped = threading.Event()
 
-    def persist():
-        if not db.save_account_inspection(run):
+    def persist(failure=None):
+        saved = db.save_account_inspection(run, failure=failure) if failure is not None else db.save_account_inspection(run)
+        if not saved:
             raise InspectionStopped("巡检任务已结束或被中断")
 
-    def record(**counts):
+    def record(*, failure=None, **counts):
         with stats_lock:
+            previous = {key: run[key] for key in counts}
             for key, value in counts.items():
                 run[key] += value
-            persist()
+            try:
+                persist(failure)
+            except BaseException:
+                # 明细落库失败时不能让 finally 单独保存已经增加的失败计数。
+                run.update(previous)
+                raise
 
     def inspect_account(account_id, stage_executor):
         account = db.get_account(account_id)
@@ -91,15 +98,18 @@ def _run(run: dict) -> None:
             return
         try:
             live_result = _check_live(account, stage_executor)
-        except Exception:
+        except Exception as exc:
             logger.exception("巡检查活异常 account_id=%s", account_id)
-            live_result = {"ok": False}
+            live_result = {"ok": False, "status": "error", "error": f"{type(exc).__name__}: {str(exc)[:1500]}"}
         live_ok = bool(live_result.get("ok"))
         counts = {"live_success_count" if live_ok else "live_failed_count": 1}
         if live_ok:
             plan_ok = bool((live_result.get("plan_result") or {}).get("ok"))
             counts["plan_success_count" if plan_ok else "plan_failed_count"] = 1
-        record(**counts)
+        failure = None if live_ok else dict(account_id=account_id, email=account.get("email", ""),
+                                            status=live_result.get("status") or "failed",
+                                            error=live_result.get("error") or "查活失败，未返回具体原因")
+        record(failure=failure, **counts)
 
     def worker(stage_executor):
         while True:

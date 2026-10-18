@@ -171,6 +171,15 @@ def _ensure_sqlite() -> None:
                     inspection_id INTEGER PRIMARY KEY,
                     account_ids TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS account_inspection_failures (
+                    inspection_id INTEGER NOT NULL,
+                    account_id INTEGER NOT NULL,
+                    email TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    error TEXT NOT NULL,
+                    failed_at TEXT NOT NULL,
+                    PRIMARY KEY (inspection_id, account_id)
+                );
                 CREATE TABLE IF NOT EXISTS storage_meta (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -3700,7 +3709,7 @@ def create_account_inspection(account_ids: list[int] | None = None, workers: int
                    total_count=len(account_ids), checked_count=0, skipped_count=0, invalid_count=0,
                    live_success_count=0, live_failed_count=0,
                    plan_success_count=0, plan_failed_count=0, error="",
-                   account_ids=account_ids)
+                   failure_details_available=True, account_ids=account_ids)
         cursor = conn.execute("INSERT INTO account_inspections(status,payload) VALUES (?,?)", (run["status"], _inspection_payload(run)))
         run["id"] = cursor.lastrowid
         conn.execute("UPDATE account_inspections SET payload=? WHERE id=?", (_inspection_payload(run), run["id"]))
@@ -3709,13 +3718,40 @@ def create_account_inspection(account_ids: list[int] | None = None, workers: int
         return run, True
 
 
-def save_account_inspection(run: dict) -> bool:
+def save_account_inspection(run: dict, *, failure: dict | None = None) -> bool:
     # 终态不可覆盖，防止旧线程把已中断任务重新写为 running 或冲突新任务唯一索引。
     with closing(_inspection_conn()) as conn, conn:
         cursor = conn.execute("""UPDATE account_inspections SET status=?,payload=?
                                  WHERE id=? AND status IN ('queued', 'running')""",
                               (run["status"], _inspection_payload(run), run["id"]))
-        return cursor.rowcount == 1
+        saved = cursor.rowcount == 1
+        if saved and failure is not None:
+            # 统计和明细同事务保存；终态/旧 worker 不能补写历史或留下孤立明细。
+            conn.execute("""INSERT INTO account_inspection_failures
+                (inspection_id,account_id,email,status,error,failed_at) VALUES (?,?,?,?,?,?)
+                ON CONFLICT(inspection_id,account_id) DO NOTHING""",
+                (run["id"], int(failure["account_id"]), str(failure.get("email") or "")[:320],
+                 str(failure.get("status") or "failed")[:40],
+                 str(failure.get("error") or "查活失败，未返回具体原因")[:2000],
+                 str(failure.get("failed_at") or _now())))
+        return saved
+
+
+def list_account_inspection_failures(inspection_id: int, limit: int = 20, offset: int = 0) -> dict | None:
+    with closing(_inspection_conn()) as conn:
+        conn.execute("BEGIN")
+        task = conn.execute("SELECT payload FROM account_inspections WHERE id=?", (inspection_id,)).fetchone()
+        if task is None:
+            return None
+        run = json.loads(task[0])
+        items = conn.execute("""SELECT account_id,email,status,error,failed_at
+            FROM account_inspection_failures WHERE inspection_id=? ORDER BY account_id LIMIT ? OFFSET ?""",
+            (inspection_id, limit, offset)).fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM account_inspection_failures WHERE inspection_id=?",
+                             (inspection_id,)).fetchone()[0]
+    return dict(task={k: v for k, v in run.items() if k != "account_ids"},
+                items=[dict(row) for row in items], total=total,
+                details_available=bool(run.get("failure_details_available")), limit=limit, offset=offset)
 
 
 def list_account_inspections(limit: int = 50, offset: int = 0) -> dict:

@@ -835,6 +835,19 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "page 必须为正整数且不能超出范围"}), 400
         return jsonify({"ok": True, **account_inspection_service.list_inspections(limit=20, offset=(page - 1) * 20)})
 
+    @app.get("/api/accounts/inspections/<int:inspection_id>/failures")
+    def api_account_inspection_failures(inspection_id):
+        try:
+            page = int(request.args.get("page", 1))
+            if not 1 <= page <= 1 + (2**63 - 1) // 20:
+                raise ValueError("page 超出范围")
+        except (ValueError, TypeError):
+            return jsonify({"ok": False, "error": "page 必须为正整数且不能超出范围"}), 400
+        result = db.list_account_inspection_failures(inspection_id, limit=20, offset=(page - 1) * 20)
+        if result is None:
+            return jsonify({"ok": False, "error": "巡检任务不存在"}), 404
+        return jsonify({"ok": True, **result})
+
     @app.post("/api/accounts/inspections")
     def api_start_account_inspection():
         data = request.get_json(silent=True)

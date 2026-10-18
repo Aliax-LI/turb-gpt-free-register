@@ -12,6 +12,7 @@ function harness() {
   function element(id) {
     if (!elements.has(id)) elements.set(id, {
       value:'4', open:false, disabled:false, textContent:'', innerHTML:'',
+      scrollTop:0, querySelector(){return null;}, closest(){return this;},
       classList:{contains:()=>false}, showModal(){this.open=true;}, close(){this.open=false;},
     });
     return elements.get(id);
@@ -114,6 +115,61 @@ function harness() {
   assert.equal(uncertain.run('inspectionUncertain'),false);
   assert.equal(uncertain.element('btnStartInspection').disabled,false);
   assert.equal(uncertain.timers.size,0);
+
+  // 失败详情入口、按任务隔离、分页、旧响应隔离和转义。
+  assert.match(markup,/openInspectionFailures\(8\)/);
+  const details=harness();await details.resolve(0,empty);
+  details.run('openInspectionFailures(8)');
+  assert.equal(details.requests[1].url,'/api/accounts/inspections/8/failures?page=1');
+  details.run('openInspectionFailures(9)');
+  await details.resolve(1,{task:{archived:'0'},total:1,details_available:true,items:[{account_id:1,email:'stale@example.test',error:'stale'}]});
+  assert.doesNotMatch(details.element('inspectionFailuresContent').innerHTML,/stale@example/);
+  assert.equal(details.requests[2].url,'/api/accounts/inspections/9/failures?page=1');
+  await details.resolve(2,{task:{archived:'only'},total:21,details_available:true,items:[{
+    account_id:2,email:'<img src=x>',status:'deactivated',error:'<script>alert(1)</script>',failed_at:'2026-10-18T12:00:00',
+  }]});
+  assert.match(details.element('inspectionFailuresContent').innerHTML,/账号已废/);
+  assert.match(details.element('inspectionFailuresContent').innerHTML,/&lt;script&gt;/);
+  assert.doesNotMatch(details.element('inspectionFailuresContent').innerHTML,/<script>|<img/);
+  assert.equal(details.element('inspectionFailuresNext').disabled,false);
+  details.run('changeInspectionFailuresPage(1)');
+  assert.equal(details.requests[3].url,'/api/accounts/inspections/9/failures?page=2');
+  await details.resolve(3,{task:{archived:'only'},total:21,details_available:true,items:[{account_id:25,email:'last@example.test',error:'mailbox unavailable'}]});
+  assert.match(details.element('inspectionFailuresContent').innerHTML,/last@example/);
+  assert.equal(details.element('inspectionFailuresNext').disabled,true);
+  details.run('openInspectionFailures(10)');
+  assert.equal(details.element('inspectionFailuresNext').disabled,true);
+  assert.doesNotMatch(details.element('inspectionFailuresSubtitle').textContent,/已归档/);
+  await details.resolve(4,{task:{archived:'0'},total:0,details_available:false,items:[]});
+  assert.match(details.element('inspectionFailuresContent').innerHTML,/旧任务仅保留汇总/);
+  details.run('openInspectionFailures(11)');
+  await details.expire();
+  assert.match(details.element('inspectionFailuresContent').innerHTML,/暂时无法读取/);
+  assert.equal(details.element('inspectionFailuresRefresh').disabled,false);
+  details.run('refreshInspectionFailures()');
+  await details.resolve(6,{task:{archived:'0'},total:0,details_available:true,items:[]});
+  assert.match(details.element('inspectionFailuresContent').innerHTML,/暂无查活失败记录/);
+  assert.equal(details.timers.size,0);
+
+  // 同页 DOM 不变时跳过重建；有变化保留阅读位置，翻页重置。
+  details.run(`(() => {
+    let markup = 'old', writes = 0;
+    let wrap = {scrollLeft:0};
+    const body = {scrollTop:0};
+    const content = {
+      closest:()=>body, querySelector:()=>wrap,
+      get innerHTML(){return markup;},
+      set innerHTML(value){markup=value;writes++;wrap={scrollLeft:0};body.scrollTop=0;},
+    };
+    renderInspectionContent(content, 'first', 'page:1');
+    wrap.scrollLeft=180;body.scrollTop=600;
+    renderInspectionContent(content, 'first', 'page:1');
+    if(writes!==1 || wrap.scrollLeft!==180 || body.scrollTop!==600)throw Error('unchanged render reset');
+    renderInspectionContent(content, 'changed', 'page:1');
+    if(writes!==2 || wrap.scrollLeft!==180 || body.scrollTop!==600)throw Error('refresh scroll reset');
+    renderInspectionContent(content, 'second', 'page:2');
+    if(wrap.scrollLeft!==0 || body.scrollTop!==0)throw Error('page scroll not reset');
+  })()`);
 
   const initial=harness();await initial.reject(0,new Error('offline'));
   assert.match(initial.element('inspectionHistoryContent').innerHTML,/暂时无法读取/);
