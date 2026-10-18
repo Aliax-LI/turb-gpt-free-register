@@ -2379,6 +2379,24 @@ def delete_account(acc_id: int | None = None, email: str | None = None) -> bool:
         return True
 
 
+def delete_deactivated_accounts(archived: str = "0") -> int:
+    """按归档范围直接删除已废账号及其 Agent 凭证；不重写其他账号或巡检历史。"""
+    if archived not in {"0", "only", "all"}:
+        raise ValueError("archived 必须为 0、only 或 all")
+    where = "lower(trim(COALESCE(json_extract(payload, '$.live_check_status'), ''))) = 'deactivated'"
+    params = ()
+    if archived != "all":
+        where += " AND archived=?"
+        params = (int(archived == "only"),)
+    with _LOCK:
+        _ensure_sqlite()
+        with closing(_sqlite_conn()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM codex_agent_accounts WHERE account_id IN "
+                         "(SELECT id FROM accounts WHERE " + where + ")", params)
+            return conn.execute("DELETE FROM accounts WHERE " + where, params).rowcount
+
+
 def delete_accounts(account_ids: list[int] | None = None, emails: list[str] | None = None) -> tuple[list[dict], list[dict]]:
     """
     批量删除已注册账号。
@@ -3706,7 +3724,7 @@ def create_account_inspection(account_ids: list[int] | None = None, workers: int
                 params = (int(archived == "only"),)
             account_ids = [row[0] for row in conn.execute(sql + " ORDER BY id DESC", params)]
         run = dict(status="queued", workers=workers, archived=archived, created_at=_now(), finished_at=None,
-                   total_count=len(account_ids), checked_count=0, skipped_count=0, invalid_count=0,
+                   total_count=len(account_ids), checked_count=0, skipped_count=0, deactivated_skipped_count=0, invalid_count=0,
                    live_success_count=0, live_failed_count=0,
                    plan_success_count=0, plan_failed_count=0, error="",
                    failure_details_available=True, account_ids=account_ids)

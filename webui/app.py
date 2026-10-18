@@ -558,6 +558,14 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "账号不存在"}), 404
         return jsonify({"ok": True, "deleted": True})
 
+    @app.post("/api/accounts/delete-deactivated")
+    def api_accounts_delete_deactivated():
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or data.get("archived") not in ("0", "only", "all"):
+            return jsonify({"ok": False, "error": "请指定 archived：0、only 或 all"}), 400
+        deleted = db.delete_deactivated_accounts(archived=data["archived"])
+        return jsonify({"ok": True, "deleted_count": deleted})
+
     @app.post("/api/accounts/delete-bulk")
     def api_accounts_delete_bulk():
         """批量删除已注册账号记录。Body {account_ids: [...]} 或 {ids: [...]}。"""

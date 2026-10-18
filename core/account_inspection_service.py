@@ -65,6 +65,7 @@ def _run(run: dict) -> None:
     run["account_ids"] = account_ids
     run["total_count"] = len(account_ids)
     run.setdefault("skipped_count", 0)
+    run.setdefault("deactivated_skipped_count", 0)
     pending = iter(account_ids)
     claim_lock = threading.Lock()
     stats_lock = threading.Lock()
@@ -91,6 +92,13 @@ def _run(run: dict) -> None:
         account = db.get_account(account_id)
         if account is None:
             record(skipped_count=1)
+            return
+        if str(account.get("live_check_status") or "").strip().lower() == "deactivated":
+            record(skipped_count=1, deactivated_skipped_count=1, failure=dict(
+                account_id=account_id, email=account.get("email", ""), status="deactivated_skipped",
+                error="账号已标记为已废，本次巡检跳过，不执行 AT 检查、查活及查套餐。" +
+                      (" 原因：" + str(account["live_check_error"]) if account.get("live_check_error") else ""),
+            ))
             return
         invalid = token_needs_refresh(account.get("access_token", ""))
         record(checked_count=1, invalid_count=int(invalid))

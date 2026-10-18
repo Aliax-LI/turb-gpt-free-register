@@ -81,7 +81,7 @@
       <label class="inspection-field" for="inspectionWorkers">并发线程数</label>
       <input id="inspectionWorkers" name="workers" type="number" min="1" max="32" step="1" value="3" required aria-describedby="inspectionWorkersHint">
       <p id="inspectionWorkersHint" class="inspection-hint">支持 1–32 个线程，默认 3 个。每个账号在本次任务中只执行一次；已有任务未结束时不能重复启动。</p>
-      <p class="inspection-hint">AT 失效 → 自动查活 → 复用同一会话查套餐</p>
+      <p class="inspection-hint">已废账号直接跳过；AT 失效 → 自动查活 → 同会话查套餐</p>
     </div>
     <div class="inspection-footer"><span>执行结果将保存在巡检历史中</span><div class="inspection-footer-actions">
       <button class="inspection-btn" type="button" onclick="document.getElementById('inspectionStartDialog').close()">取消</button>
@@ -98,7 +98,7 @@
   </div>
   <div class="inspection-body">
     <div class="inspection-notice"><strong>本地检查 → 失效查活 → 同会话查套餐</strong><span>范围跟随启动时的归档筛选，不受其他列表筛选影响。</span>
-      <details><summary>统计口径与巡检规则</summary><p>仅本地解析 JWT exp；过期、缺失或无法解析的 AT 视为失效。查活成功后复用同一会话自动查套餐，巡检不会重复查询；入队被拒绝也计入对应失败数。执行前已删除的账号计为跳过，不计为 AT 失效。</p></details>
+      <details><summary>统计口径与巡检规则</summary><p>仅本地解析 JWT exp；过期、缺失或无法解析的 AT 视为失效。查活成功后复用同一会话自动查套餐，巡检不会重复查询；入队被拒绝也计入对应失败数。执行前已删除或已标记为已废的账号计为跳过，不计为 AT 失效；已废账号保存到失败详情，但不计为实际查活失败。</p></details>
     </div>
     <div id="inspectionHistoryContent" aria-live="polite"><div class="inspection-empty"><strong>正在加载巡检记录…</strong><p>请稍候</p></div></div>
   </div>
@@ -123,6 +123,33 @@
 let inspectionArchived = '0';
 function inspectionScopeName(archived) {
   return archived === 'only' ? '已归档' : (archived === 'all' ? '全部账号' : '未归档');
+}
+let deletingDeactivatedAccounts = false;
+async function deleteDeactivatedAccounts() {
+  if (deletingDeactivatedAccounts) return;
+  const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
+  const scope = inspectionScopeName(archived);
+  if (!confirm(`确定删除「${scope}」范围内全部已废账号吗？\n\n不限当前页，不受搜索或其他筛选条件影响。仅删除本地已废账号及关联 Agent 凭证，保留巡检历史。此操作不可撤销。`)) return;
+  deletingDeactivatedAccounts = true;
+  const button = document.getElementById('btnDeleteDeactivatedAccounts');
+  button.disabled = true;
+  button.textContent = '删除中…';
+  try {
+    const result = await inspectionRequest('/api/accounts/delete-deactivated', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({archived}),
+    });
+    // 清理选择，避免跨页选择残留已删除的账号 ID。
+    ACCOUNT_SELECTED.clear();
+    loadAccounts(); loadSummary();
+    showToast(`已删除 ${inspectionCount(result.deleted_count)} 个已废账号`);
+  } catch (error) {
+    showToast('未能确认删除结果，请刷新账号列表核实：' + error.message);
+    loadAccounts(); loadSummary();
+  } finally {
+    deletingDeactivatedAccounts = false;
+    button.disabled = false;
+    button.textContent = '一键删除已废';
+  }
 }
 let inspectionPage = 1;
 let inspectionLoading = false;
@@ -257,11 +284,11 @@ async function refreshInspectionHistory() {
         `${inspectionTime(r.created_at)}<span class="inspection-sub">结束：${esc(r.finished_at ? String(r.finished_at).replace('T', ' ') : '—')}</span>`,
         `<span class="inspection-pill inspection-pill--${statusClass}">${esc(names[r.status] || r.status)}</span>`,
         `<span class="inspection-number">${inspectionCount(r.workers) || 1}</span>`,
-        `<span class="inspection-number">${checked} / ${total}</span><div class="inspection-progress" aria-hidden="true"><span style="width:${progress}%"></span></div><span class="inspection-sub">跳过 ${skipped} 个</span>`,
+        `<span class="inspection-number">${checked} / ${total}</span><div class="inspection-progress" aria-hidden="true"><span style="width:${progress}%"></span></div><span class="inspection-sub">跳过 ${skipped} 个（已废 ${inspectionCount(r.deactivated_skipped_count)}）</span>`,
         `<span class="inspection-number ${inspectionCount(r.invalid_count) ? 'inspection-failure' : ''}">${inspectionCount(r.invalid_count)}</span>`,
         inspectionResultCounts(r.live_success_count, r.live_failed_count) +
-          (inspectionCount(r.live_failed_count) && Number.isSafeInteger(Number(r.id)) && Number(r.id) > 0
-            ? `<button class="inspection-btn inspection-detail-link" type="button" onclick="openInspectionFailures(${Number(r.id)})">失败详情（${inspectionCount(r.live_failed_count)}）</button>` : ''),
+          ((inspectionCount(r.live_failed_count) + inspectionCount(r.deactivated_skipped_count)) && Number.isSafeInteger(Number(r.id)) && Number(r.id) > 0
+            ? `<button class="inspection-btn inspection-detail-link" type="button" onclick="openInspectionFailures(${Number(r.id)})">失败详情（${inspectionCount(r.live_failed_count) + inspectionCount(r.deactivated_skipped_count)}）</button>` : ''),
         inspectionResultCounts(r.plan_success_count, r.plan_failed_count),
       ];
       return `<tr>${cells.map(c => `<td>${c}</td>`).join('')}</tr>` +
@@ -330,14 +357,14 @@ async function refreshInspectionFailures() {
     if (version !== inspectionFailuresVersion || taskId !== inspectionFailuresTask || page !== inspectionFailuresPage) return;
     const content = document.getElementById('inspectionFailuresContent');
     inspectionFailuresTotal = inspectionCount(data.total);
-    document.getElementById('inspectionFailuresSubtitle').textContent = `${inspectionScopeName(data.task.archived || '0')} · 失败原因按本次任务保存，每 5 秒自动更新`;
+    document.getElementById('inspectionFailuresSubtitle').textContent = `${inspectionScopeName(data.task.archived || '0')} · 含已废跳过，原因按本次任务保存，每 5 秒自动更新`;
     let markup;
     if (!data.details_available) {
       markup = '<div class="inspection-empty"><strong>该历史任务未保存失败明细</strong><p>旧任务仅保留汇总，无法还原当时的失败原因。新增巡检会保存失败详情。</p></div>';
     } else if (!data.items.length) {
-      markup = '<div class="inspection-empty"><strong>暂无查活失败记录</strong><p>任务执行期间，失败记录将在处理完成后显示。</p></div>';
+      markup = '<div class="inspection-empty"><strong>暂无查活失败或已废跳过记录</strong><p>任务执行期间，失败记录将在处理完成后显示。</p></div>';
     } else {
-      const statuses = {failed:'查活失败', deactivated:'账号已废', rejected:'未能入队', error:'执行异常'};
+      const statuses = {deactivated_skipped:'已废跳过', failed:'查活失败', deactivated:'账号已废', rejected:'未能入队', error:'执行异常'};
       const rows = data.items.map(r => `<tr><td>#${esc(r.account_id)}</td><td class="inspection-email">${esc(r.email)}</td><td>${esc(statuses[r.status] || r.status)}</td><td>${inspectionTime(r.failed_at)}</td><td class="inspection-reason">${esc(r.error)}</td></tr>`).join('');
       markup = `<p class="inspection-scroll-hint">左右滑动表格查看完整失败原因</p><div class="inspection-table-wrap" tabindex="0" role="region" aria-label="查活失败明细，可左右滚动"><table class="inspection-table inspection-failure-table"><thead><tr><th scope="col">账号 ID</th><th scope="col">账号邮箱</th><th scope="col">失败类型</th><th scope="col">记录时间</th><th scope="col">失败原因</th></tr></thead><tbody>${rows}</tbody></table></div>`;
     }

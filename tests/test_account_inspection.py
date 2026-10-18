@@ -58,6 +58,125 @@ class AccountInspectionTests(unittest.TestCase):
         lease_patch.start()
         self.addCleanup(lease_patch.stop)
 
+    def test_deactivated_is_skipped_before_token_check_and_saved_in_details(self):
+        db._ensure_sqlite()
+        with closing(db._sqlite_conn()) as conn, conn:
+            for account_id in (1, 2, 5):
+                conn.execute("UPDATE accounts SET payload=json_set(payload, '$.live_check_status', 'deactivated', "
+                             "'$.live_check_error', 'account_deactivated') WHERE id=?", (account_id,))
+        run, _ = db.create_account_inspection([1, 2, 3, 5], workers=4, archived='all')
+        original_token_check = service.token_needs_refresh
+        with patch.object(service, 'token_needs_refresh', wraps=original_token_check) as token_check, \
+             patch.object(service.live_check_service, 'enqueue_account_live_check', return_value=completed(True)) as live:
+            service._run(run)
+        self.assertEqual(run['status'], 'completed')
+        self.assertEqual(run['checked_count'], 1)
+        self.assertEqual(run['skipped_count'], 3)
+        self.assertEqual(run['deactivated_skipped_count'], 3)
+        self.assertEqual(run['invalid_count'], 1)
+        self.assertEqual(run['live_failed_count'], 0)
+        self.assertEqual(token_check.call_count, 1)
+        self.assertEqual(live.call_count, 1)
+        self.assertEqual(live.call_args.kwargs['account_id'], 3)
+        details = db.list_account_inspection_failures(run['id'])
+        self.assertEqual(details['total'], 3)
+        self.assertEqual({item['status'] for item in details['items']}, {'deactivated_skipped'})
+        self.assertTrue(all('account_deactivated' in item['error'] for item in details['items']))
+        db.delete_deactivated_accounts('all')
+        self.assertEqual(db.list_account_inspection_failures(run['id'])['items'], details['items'])
+
+    def test_delete_deactivated_is_scoped_targeted_and_cleans_agent_credentials(self):
+        db._ensure_sqlite()
+        with closing(db._sqlite_conn()) as conn, conn:
+            for account_id in (1, 2, 5):
+                conn.execute("UPDATE accounts SET payload=json_set(payload, '$.live_check_status', 'deactivated') WHERE id=?", (account_id,))
+                conn.execute("INSERT INTO codex_agent_accounts(account_id,payload) VALUES (?, '{}')", (account_id,))
+            # 恢复正常的账号不能因曾经已废而被删除。
+            conn.execute("UPDATE accounts SET payload=json_set(payload, '$.live_check_status', 'ok') WHERE id=1")
+            unchanged = conn.execute('SELECT payload FROM accounts WHERE id=1').fetchone()[0]
+        with patch.object(db, '_load_accounts', side_effect=AssertionError('must not load all accounts')), \
+             patch.object(db, '_save_accounts', side_effect=AssertionError('must not rewrite accounts')):
+            self.assertEqual(db.delete_deactivated_accounts('0'), 1)
+            self.assertIsNone(db.get_account(2))
+            self.assertIsNotNone(db.get_account(5))
+            self.assertEqual(db.delete_deactivated_accounts('only'), 1)
+            self.assertEqual(db.delete_deactivated_accounts('all'), 0)
+        with closing(db._sqlite_conn()) as conn:
+            self.assertEqual(conn.execute('SELECT payload FROM accounts WHERE id=1').fetchone()[0], unchanged)
+            self.assertEqual([r[0] for r in conn.execute('SELECT account_id FROM codex_agent_accounts')], [1])
+        with self.assertRaises(ValueError):
+            db.delete_deactivated_accounts('invalid')
+
+    def test_delete_deactivated_transaction_rolls_back_credentials_on_delete_failure(self):
+        db._ensure_sqlite()
+        with closing(db._sqlite_conn()) as conn, conn:
+            conn.execute("UPDATE accounts SET payload=json_set(payload, '$.live_check_status', 'deactivated') WHERE id=2")
+            conn.execute("INSERT INTO codex_agent_accounts(account_id,payload) VALUES (2, '{}')")
+            conn.executescript("CREATE TRIGGER reject_account_delete BEFORE DELETE ON accounts "
+                               "BEGIN SELECT RAISE(ABORT, 'delete failed'); END;")
+        with self.assertRaisesRegex(sqlite3.DatabaseError, 'delete failed'):
+            db.delete_deactivated_accounts('all')
+        self.assertIsNotNone(db.get_account(2))
+        with closing(db._sqlite_conn()) as conn:
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM codex_agent_accounts WHERE account_id=2').fetchone()[0], 1)
+
+    def test_delete_deactivated_waits_for_writer_and_rechecks_committed_status(self):
+        db._ensure_sqlite()
+        db.update_account_liveness(2, {'ok': False, 'status': 'deactivated', 'error': 'old failure'})
+        # 外部连接代表另一个进程先恢复正常但尚未提交的账号状态。
+        original_conn = db._sqlite_conn
+        deleting = threading.Event()
+        def traced_conn():
+            conn = original_conn()
+            conn.set_trace_callback(lambda sql: deleting.set() if sql == 'BEGIN IMMEDIATE' else None)
+            return conn
+        with closing(original_conn()) as writer:
+            writer.execute('BEGIN IMMEDIATE')
+            writer.execute("UPDATE accounts SET payload=json_set(payload, '$.live_check_status', 'ok') WHERE id=2")
+            with ThreadPoolExecutor(max_workers=1) as pool, patch.object(db, '_sqlite_conn', side_effect=traced_conn):
+                future = pool.submit(db.delete_deactivated_accounts, 'all')
+                try:
+                    self.assertTrue(deleting.wait(5))
+                    self.assertFalse(future.done())
+                finally:
+                    writer.commit()
+                self.assertEqual(future.result(timeout=5), 0)
+        self.assertEqual(db.get_account(2)['live_check_status'], 'ok')
+
+    def test_deactivated_skip_detail_failure_rolls_back_both_skip_counters(self):
+        db._ensure_sqlite()
+        db.update_account_liveness(2, {'ok': False, 'status': 'deactivated', 'error': 'account_deactivated'})
+        run, _ = db.create_account_inspection([2], workers=1)
+        with closing(db._sqlite_conn()) as conn, conn:
+            conn.executescript("CREATE TRIGGER fail_skip_detail BEFORE INSERT ON account_inspection_failures "
+                               "BEGIN SELECT RAISE(ABORT, 'skip detail failure'); END;")
+        with patch.object(service.live_check_service, 'enqueue_account_live_check') as live, \
+             patch.object(service.logger, 'exception'):
+            service._run(run)
+        live.assert_not_called()
+        details = db.list_account_inspection_failures(run['id'])
+        self.assertEqual(details['task']['status'], 'failed')
+        self.assertEqual(details['task']['skipped_count'], 0)
+        self.assertEqual(details['task']['deactivated_skipped_count'], 0)
+        self.assertEqual(details['total'], 0)
+
+    def test_delete_deactivated_api_validates_scope_and_auth(self):
+        client = create_app(auth_code='delete-test').test_client()
+        headers = {'X-Auth-Code': 'delete-test', 'Accept-Encoding': 'identity'}
+        url = '/api/accounts/delete-deactivated'
+        self.assertEqual(client.post(url, json={'archived':'all'}).status_code, 401)
+        for data in ({}, [], {'archived':True}, {'archived':[]}, {'archived':'bad'}):
+            self.assertEqual(client.post(url, json=data, headers=headers).status_code, 400)
+        self.assertEqual(client.post(url, json={'archived':'only'}, headers=headers).get_json()['deleted_count'], 0)
+        with closing(db._sqlite_conn()) as conn, conn:
+            conn.execute("UPDATE accounts SET payload=json_set(payload, '$.live_check_status', 'deactivated') WHERE id IN (2,5)")
+        self.assertEqual(client.post(url, json={'archived':'only'}, headers=headers).get_json()['deleted_count'], 1)
+        self.assertIsNone(db.get_account(5))
+        self.assertIsNotNone(db.get_account(2))
+        self.assertEqual(client.post(url, json={'archived':'all'}, headers=headers).get_json()['deleted_count'], 1)
+        self.assertIsNotNone(db.get_account(1))
+
+
     def test_live_failure_details_capture_rejection_exception_and_account_snapshot(self):
         run, _ = db.create_account_inspection([2, 3, 4], workers=1)
         def enqueue(**kwargs):

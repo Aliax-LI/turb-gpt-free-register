@@ -28,6 +28,20 @@ with sync_playwright() as p:
     browser=p.chromium.launch(headless=True, channel='chrome')
     for template in ('index.html','index_legacy.html'):
         css=''.join(re.findall(r'<style>([\s\S]*?)</style>',(root/'webui/templates'/template).read_text()))
+        # 隔离固定侧栏外壳，仅验证工具栏本身在窄容器中换行，不测试全站侧栏适配。
+        layout=browser.new_page(viewport={'width':390,'height':844})
+        source=(root/'webui/templates'/template).read_text()
+        selector='#accountsToolbarV2' if template=='index.html' else '.accounts-actionbar'
+        toolbar=layout.evaluate("([source,selector])=>new DOMParser().parseFromString(source,'text/html').querySelector(selector).outerHTML", [source,selector])
+        layout.set_content(f'<html><head><style>{css} body {{padding-left:0;}}</style></head><body><main><section class="accounts-panel-v2 card"><div class="accounts-toolbar">{toolbar}</div></section></main></body></html>')
+        for width in (320,390,768,1328):
+            layout.set_viewport_size({'width':width,'height':844})
+            button=layout.locator('#btnDeleteDeactivatedAccounts')
+            button.scroll_into_view_if_needed()
+            box=button.bounding_box()
+            assert box and box['width']>0 and box['x']>=0 and box['x']+box['width']<=width, (template,width,box)
+        layout.screenshot(path=str(output/f'deactivated-toolbar-{template}.png'))
+        layout.close()
         page=browser.new_page(viewport={'width':1328,'height':800},device_scale_factor=1)
         errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
         page.set_content(f'<html><head><style>{css}</style></head><body><main><section class="card"><div class="head"><h3>账号管理</h3></div><div class="body">账号列表 · 一键巡检</div></section></main><div id="tab-accounts"></div><button id="btnStartInspection">一键巡检</button>{bootstrap}{component}</body></html>')

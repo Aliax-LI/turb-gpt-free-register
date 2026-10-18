@@ -9,6 +9,7 @@ async function flush() {for (let i = 0; i < 12; i++) await Promise.resolve();}
 function harness() {
   const elements = new Map(), requests = [], timers = new Map(), toasts = [];
   let nextTimer = 0, accountsReloaded = 0;
+  const confirmations = [], selected = new Set([1,2]);
   function element(id) {
     if (!elements.has(id)) elements.set(id, {
       value:'4', open:false, disabled:false, textContent:'', innerHTML:'',
@@ -19,6 +20,7 @@ function harness() {
   }
   const context = vm.createContext({
     document:{hidden:false, getElementById:element}, SHOW_ARCHIVED_ACCOUNTS:true, AbortController,
+    ACCOUNT_SELECTED:selected, confirm(message){confirmations.push(message);return true;},
     setTimeout(callback){const id=++nextTimer;timers.set(id,callback);return id;},
     clearTimeout(id){timers.delete(id);}, setInterval(){},
     showToast(message){toasts.push(message);}, loadAccounts(){accountsReloaded++;}, loadSummary(){},
@@ -33,7 +35,7 @@ function harness() {
   });
   const run=source=>vm.runInContext(source,context);
   run(script);
-  return {element,requests,timers,toasts,run,get accountsReloaded(){return accountsReloaded;},
+  return {element,requests,timers,toasts,run,confirmations,selected,get accountsReloaded(){return accountsReloaded;},
     async resolve(index,value){requests[index].resolve(value);await flush();},
     async reject(index,error){requests[index].reject(error);await flush();},
     async expire(){for(const callback of [...timers.values()])callback();await flush();},
@@ -148,7 +150,7 @@ function harness() {
   assert.equal(details.element('inspectionFailuresRefresh').disabled,false);
   details.run('refreshInspectionFailures()');
   await details.resolve(6,{task:{archived:'0'},total:0,details_available:true,items:[]});
-  assert.match(details.element('inspectionFailuresContent').innerHTML,/暂无查活失败记录/);
+  assert.match(details.element('inspectionFailuresContent').innerHTML,/暂无查活失败或已废跳过记录/);
   assert.equal(details.timers.size,0);
 
   // 同页 DOM 不变时跳过重建；有变化保留阅读位置，翻页重置。
@@ -170,6 +172,36 @@ function harness() {
     renderInspectionContent(content, 'second', 'page:2');
     if(wrap.scrollLeft!==0 || body.scrollTop!==0)throw Error('page scroll not reset');
   })()`);
+
+  // 一键删除已废：确认范围、启动时快照、防重复提交和选择清理。
+  const deletion=harness();await deletion.resolve(0,empty);
+  const deleting=deletion.run('deleteDeactivatedAccounts()');
+  assert.match(deletion.confirmations[0],/已归档/);
+  assert.match(deletion.confirmations[0],/不限当前页/);
+  assert.deepEqual(JSON.parse(deletion.requests[1].options.body),{archived:'only'});
+  deletion.run('SHOW_ARCHIVED_ACCOUNTS=false;deleteDeactivatedAccounts()');
+  assert.equal(deletion.requests.length,2);
+  assert.equal(deletion.element('btnDeleteDeactivatedAccounts').disabled,true);
+  await deletion.resolve(1,{ok:true,deleted_count:2});await deleting;
+  assert.equal(deletion.selected.size,0);
+  assert.equal(deletion.element('btnDeleteDeactivatedAccounts').disabled,false);
+  const retried=deletion.run('deleteDeactivatedAccounts()');
+  assert.deepEqual(JSON.parse(deletion.requests[2].options.body),{archived:'0'});
+  await deletion.reject(2,new Error('offline'));await retried;
+  assert.match(deletion.toasts.at(-1),/核实/);
+  assert.equal(deletion.element('btnDeleteDeactivatedAccounts').disabled,false);
+  deletion.run('confirm=()=>false;deleteDeactivatedAccounts()');
+  assert.equal(deletion.requests.length,3);
+  // 已废跳过能独立进入详情，但不冒充查活失败。
+  deletion.run('refreshInspectionHistory()');
+  await deletion.resolve(3,{active:null,total:1,items:[{id:6,status:'completed',total_count:2,
+    checked_count:0,skipped_count:2,deactivated_skipped_count:2,live_failed_count:0}]});
+  assert.match(deletion.element('inspectionHistoryContent').innerHTML,/已废 2/);
+  assert.match(deletion.element('inspectionHistoryContent').innerHTML,/失败详情（2）/);
+  deletion.run('openInspectionFailures(6)');
+  await deletion.resolve(4,{task:{archived:'0'},details_available:true,total:2,
+    items:[{account_id:1,email:'dead@example.test',status:'deactivated_skipped',error:'已废跳过'}]});
+  assert.match(deletion.element('inspectionFailuresContent').innerHTML,/已废跳过/);
 
   const initial=harness();await initial.reject(0,new Error('offline'));
   assert.match(initial.element('inspectionHistoryContent').innerHTML,/暂时无法读取/);
