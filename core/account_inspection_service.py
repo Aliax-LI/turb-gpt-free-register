@@ -68,6 +68,7 @@ def _run(run: dict) -> None:
     pending = iter(account_ids)
     claim_lock = threading.Lock()
     stats_lock = threading.Lock()
+    stopped = threading.Event()
 
     def persist():
         if not db.save_account_inspection(run):
@@ -103,10 +104,18 @@ def _run(run: dict) -> None:
     def worker(stage_executor):
         while True:
             with claim_lock:
+                if stopped.is_set():
+                    return
                 account_id = next(pending, None)
             if account_id is None:
                 return
-            inspect_account(account_id, stage_executor)
+            try:
+                inspect_account(account_id, stage_executor)
+            except BaseException:
+                # 一个 worker 发生存储/执行故障后，不应让其他 worker 继续领取整份清单。
+                # 已在执行中的账号仍完成收尾，避免遗留会话和队列占用。
+                stopped.set()
+                raise
 
     try:
         workers = validate_workers(run.get("workers", DEFAULT_WORKERS))

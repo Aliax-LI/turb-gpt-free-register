@@ -1,11 +1,13 @@
 import base64
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -55,6 +57,257 @@ class AccountInspectionTests(unittest.TestCase):
         lease_patch = patch.object(service, 'acquire_inspection_lease', side_effect=tracked_acquire)
         lease_patch.start()
         self.addCleanup(lease_patch.stop)
+
+    def test_idle_history_poll_does_not_wait_for_unrelated_writer(self):
+        run, _ = db.create_account_inspection([1])
+        run.update(status='completed', checked_count=1)
+        db.save_account_inspection(run)
+        original = db._sqlite_conn
+        def short_timeout_connection():
+            conn = original()
+            conn.execute('PRAGMA busy_timeout=50')
+            return conn
+        with closing(original()) as writer:
+            writer.execute('BEGIN IMMEDIATE')
+            with patch.object(db, '_sqlite_conn', side_effect=short_timeout_connection):
+                history = service.list_inspections()
+            writer.rollback()
+        self.assertIsNone(history['active'])
+        self.assertEqual(history['total'], 1)
+
+    def test_connection_setup_failure_closes_connection(self):
+        connection = Mock()
+        connection.execute.side_effect = sqlite3.OperationalError('pragma setup failed')
+        with patch.object(db.sqlite3, 'connect', return_value=connection):
+            with self.assertRaisesRegex(sqlite3.OperationalError, 'pragma setup failed'):
+                db._sqlite_conn()
+        connection.close.assert_called_once()
+
+    def test_schema_initialization_failure_closes_connection(self):
+        db._ensure_sqlite()
+        class FailingConnection(sqlite3.Connection):
+            closed = False
+            def execute(self, sql, *args, **kwargs):
+                if sql.startswith('CREATE INDEX'):
+                    raise OSError('schema initialization failed')
+                return super().execute(sql, *args, **kwargs)
+            def close(self):
+                self.closed = True
+                return super().close()
+        conn = sqlite3.connect(str(db._active_sqlite_path()), factory=FailingConnection)
+        self.addCleanup(conn.close)
+        db._SQLITE_READY = False
+        with patch.object(db, '_sqlite_conn', return_value=conn):
+            with self.assertRaisesRegex(OSError, 'schema initialization failed'):
+                db._ensure_sqlite()
+        self.assertTrue(conn.closed)
+        self.assertFalse(db._SQLITE_READY)
+
+    def test_email_lookup_avoids_full_account_payload_loading(self):
+        db._ensure_sqlite()
+        with patch.object(db, '_load_accounts', side_effect=AssertionError('email lookup loads all accounts')):
+            self.assertEqual(db.get_account_by_email('EXPIRED@EXAMPLE.TEST')['id'], 2)
+            self.assertIsNone(db.get_account_by_email('absent@example.test'))
+
+    def test_email_lookup_keeps_first_duplicate_and_empty_email_behavior(self):
+        with db._LOCK:
+            db._save_accounts([
+                {'id': 1, 'email': ''}, {'id': 2, 'email': 'same@example.test'},
+                {'id': 3, 'email': 'SAME@example.test'},
+            ])
+        self.assertEqual(db.get_account_by_email(None)['id'], 1)
+        self.assertEqual(db.get_account_by_email('')['id'], 1)
+        self.assertEqual(db.get_account_by_email('SAME@example.test')['id'], 2)
+        self.assertIsNone(db.get_account_by_email(' same@example.test'))
+
+    def test_email_lookup_and_plan_updates_preserve_unicode_lower_matching(self):
+        with db._LOCK:
+            db._save_accounts([
+                {'id': 1, 'email': 'K@example.test'},
+                {'id': 2, 'email': 'k@example.test'},
+                {'id': 3, 'email': 'Élodie@example.test'},
+            ])
+        # Kelvin 符号的小写为 ASCII k；必须仍选择原 Python 匹配语义下 ID 最小者。
+        self.assertEqual(db.get_account_by_email('K@EXAMPLE.TEST')['id'], 1)
+        self.assertTrue(db.claim_account_plan_check(email='K@EXAMPLE.TEST', run_id='unicode-ascii'))
+        self.assertEqual(db.get_account(1)['plan_check_run_id'], 'unicode-ascii')
+        self.assertNotIn('plan_check_run_id', db.get_account(2))
+        self.assertTrue(db.claim_account_plan_check(email='élodie@example.test', run_id='unicode'))
+        self.assertEqual(db.get_account(3)['plan_check_run_id'], 'unicode')
+        self.assertTrue(db.update_account_plan_check(email='ÉLODIE@example.test', result={'ok': True, 'current_plan_type': 'plus'}))
+        self.assertEqual(db.get_account(3)['current_plan_type'], 'plus')
+
+    def test_snapshot_is_immutable_and_not_rewritten_with_statistics(self):
+        ids = list(range(1, 10001))
+        run, _ = db.create_account_inspection(ids)
+        with closing(db._sqlite_conn()) as conn, conn:
+            snapshot = conn.execute('SELECT account_ids FROM account_inspection_snapshots WHERE inspection_id=?', (run['id'],)).fetchone()[0]
+            conn.executescript("""
+                CREATE TRIGGER immutable_inspection_snapshot BEFORE UPDATE ON account_inspection_snapshots
+                BEGIN SELECT RAISE(ABORT, 'snapshot rewritten'); END;
+                CREATE TRIGGER bounded_inspection_statistics BEFORE UPDATE ON account_inspections
+                WHEN LENGTH(NEW.payload)>2000
+                BEGIN SELECT RAISE(ABORT, 'statistics contains full snapshot'); END;
+            """)
+        run.update(status='running', checked_count=1)
+        self.assertTrue(db.save_account_inspection(run))
+        with closing(db._sqlite_conn()) as conn:
+            stored = conn.execute('SELECT payload FROM account_inspections WHERE id=?', (run['id'],)).fetchone()[0]
+            self.assertNotIn('account_ids', json.loads(stored))
+            self.assertLess(len(stored), 2000)
+            self.assertEqual(conn.execute('SELECT account_ids FROM account_inspection_snapshots WHERE inspection_id=?', (run['id'],)).fetchone()[0], snapshot)
+        self.assertNotIn('account_ids', db.list_account_inspections()['active'])
+        existing, created = db.create_account_inspection([99999])
+        self.assertFalse(created)
+        self.assertEqual(existing['account_ids'], ids)
+        self.assertEqual(existing['checked_count'], 1)
+
+    def test_legacy_inspection_snapshot_migration_keeps_history_and_recovery(self):
+        run, _ = db.create_account_inspection([2, 3])
+        run.update(status='running', checked_count=1, invalid_count=1)
+        with closing(db._sqlite_conn()) as conn, conn:
+            conn.execute('UPDATE account_inspections SET status=?,payload=? WHERE id=?', ('running', json.dumps(run), run['id']))
+            conn.execute('DELETE FROM account_inspection_snapshots')
+            conn.execute("DELETE FROM storage_meta WHERE key='inspection_snapshots_v1'")
+        db._SQLITE_READY = False
+        db._ensure_sqlite()
+        existing, created = db.create_account_inspection([4])
+        self.assertFalse(created)
+        self.assertEqual(existing['account_ids'], [2, 3])
+        self.assertEqual(existing['checked_count'], 1)
+        self.assertEqual(db.recover_interrupted_account_inspections(), 1)
+        history = db.list_account_inspections()['items'][0]
+        self.assertEqual(history['status'], 'interrupted')
+        self.assertEqual(history['checked_count'], 1)
+        with closing(db._sqlite_conn()) as conn:
+            self.assertNotIn('account_ids', json.loads(conn.execute('SELECT payload FROM account_inspections').fetchone()[0]))
+        db._SQLITE_READY = False
+        db._ensure_sqlite()
+        self.assertEqual(db.list_account_inspections()['items'][0], history)
+
+    def test_snapshot_migration_failure_rolls_back_and_releases_connection(self):
+        run, _ = db.create_account_inspection([2, 3])
+        with closing(db._sqlite_conn()) as conn, conn:
+            conn.execute('UPDATE account_inspections SET payload=? WHERE id=?', (json.dumps(run), run['id']))
+            conn.execute('DELETE FROM account_inspection_snapshots')
+            conn.execute("DELETE FROM storage_meta WHERE key='inspection_snapshots_v1'")
+            conn.executescript("""
+                CREATE TRIGGER fail_snapshot_migration BEFORE INSERT ON account_inspection_snapshots
+                BEGIN SELECT RAISE(ABORT, 'migration storage failure'); END;
+            """)
+        db._SQLITE_READY = False
+        with self.assertRaisesRegex(Exception, 'migration storage failure'):
+            db._ensure_sqlite()
+        self.assertFalse(db._SQLITE_READY)
+        with closing(db._sqlite_conn()) as conn, conn:
+            conn.execute('PRAGMA busy_timeout=1000')
+            conn.execute('BEGIN IMMEDIATE')
+            self.assertEqual(json.loads(conn.execute('SELECT payload FROM account_inspections').fetchone()[0])['account_ids'], [2, 3])
+            self.assertIsNone(conn.execute("SELECT 1 FROM storage_meta WHERE key='inspection_snapshots_v1'").fetchone())
+            conn.execute('DROP TRIGGER fail_snapshot_migration')
+        db._ensure_sqlite()
+        self.assertEqual(db.create_account_inspection([4])[0]['account_ids'], [2, 3])
+
+    def test_snapshot_insert_failure_rolls_back_task_creation(self):
+        db._ensure_sqlite()
+        with closing(db._sqlite_conn()) as conn, conn:
+            conn.executescript("""
+                CREATE TRIGGER fail_snapshot BEFORE INSERT ON account_inspection_snapshots
+                BEGIN SELECT RAISE(ABORT, 'snapshot storage unavailable'); END;
+            """)
+        with self.assertRaisesRegex(Exception, 'snapshot storage unavailable'):
+            db.create_account_inspection([2, 3])
+        self.assertEqual(db.list_account_inspections()['total'], 0)
+
+    def test_worker_failure_stops_other_workers_from_claiming_more_accounts(self):
+        run, _ = db.create_account_inspection([2, 3, 4, 5], workers=2)
+        entered = threading.Event()
+        stopped = threading.Event()
+        calls, stop_observed = [], []
+        def get(account_id):
+            calls.append(account_id)
+            if account_id == 2:
+                if not entered.wait(3):
+                    raise TimeoutError('second worker missing')
+                raise OSError('account read failed')
+            if account_id == 3:
+                entered.set()
+                stop_observed.append(stopped.wait(3))
+            return {'id': account_id, 'access_token': jwt({'exp': 9999999999})}
+        threading_wrapper = Mock(wraps=threading)
+        threading_wrapper.Event.return_value = stopped
+        with patch.object(service, 'threading', threading_wrapper), \
+             patch.object(db, 'get_account', side_effect=get), \
+             patch.object(service.logger, 'exception'):
+            service._run(run)
+        self.assertEqual(stop_observed, [True])
+        self.assertEqual(sorted(calls), [2, 3])
+        self.assertEqual(run['status'], 'failed')
+        self.assertIsNone(db.list_account_inspections()['active'])
+
+    def test_hot_path_reads_and_writes_only_target_account(self):
+        db._ensure_sqlite()
+        with closing(db._sqlite_conn()) as conn, conn:
+            untouched = conn.execute('SELECT payload FROM accounts WHERE id=1').fetchone()[0]
+            conn.executescript("""
+                CREATE TRIGGER protect_other_update BEFORE UPDATE ON accounts WHEN OLD.id != 2
+                BEGIN SELECT RAISE(ABORT, 'unrelated account updated'); END;
+                CREATE TRIGGER protect_other_delete BEFORE DELETE ON accounts
+                BEGIN SELECT RAISE(ABORT, 'accounts must not be rewritten'); END;
+            """)
+        with patch.object(db, '_load_accounts', side_effect=AssertionError('full read')), \
+             patch.object(db, '_save_accounts', side_effect=AssertionError('full write')):
+            self.assertEqual(db.get_account(2)['id'], 2)
+            self.assertIsNone(db.get_account(999999))
+            self.assertTrue(db.claim_account_live_check(2, run_id='live'))
+            self.assertTrue(db.mark_account_live_check_running(2, run_id='live'))
+            self.assertTrue(db.update_account_liveness(2, {'ok': True, 'access_token': 'fresh'}, expected_run_id='live'))
+            self.assertTrue(db.claim_account_plan_check(2, run_id='plan'))
+            self.assertTrue(db.mark_account_plan_check_running(2, run_id='plan'))
+            self.assertTrue(db.update_account_plan_check(2, result={'ok': True, 'current_plan_type': 'plus'}, expected_run_id='plan'))
+        with closing(db._sqlite_conn()) as conn, conn:
+            self.assertEqual(conn.execute('SELECT payload FROM accounts WHERE id=1').fetchone()[0], untouched)
+        self.assertEqual(db.get_account(2)['current_plan_type'], 'plus')
+
+    def test_single_account_transaction_rollback_and_index_consistency(self):
+        before = db.get_account(2)
+        with self.assertRaisesRegex(RuntimeError, 'injected rollback'):
+            with db._LOCK, db._account_for_update(2) as row:
+                row.update(email='rollback@example.test', access_token='discard')
+                raise RuntimeError('injected rollback')
+        self.assertEqual(db.get_account(2), before)
+        with db._LOCK, db._account_for_update(2) as row:
+            row.update(email='changed@example.test', archived=True, status='changed', updated_at='2030-01-01')
+        with closing(db._sqlite_conn()) as conn, conn:
+            indexed = conn.execute('SELECT email,archived,status,updated_at,payload FROM accounts WHERE id=2').fetchone()
+        payload = json.loads(indexed['payload'])
+        for field in ('email', 'status', 'updated_at'):
+            self.assertEqual(indexed[field], payload[field])
+        self.assertEqual(indexed['archived'], 1)
+        self.assertEqual(payload['copy_line'], db._account_line(payload))
+        self.assertFalse(db.update_account_liveness(999999, {'ok': True, 'access_token': 'must-not-insert'}))
+        self.assertIsNone(db.get_account(999999))
+
+    def test_single_account_update_failure_rolls_back_claim(self):
+        db._ensure_sqlite()
+        with closing(db._sqlite_conn()) as conn, conn:
+            conn.executescript("""
+                CREATE TRIGGER fail_account_update BEFORE UPDATE ON accounts
+                BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;
+            """)
+        before = db.get_account(2)
+        with self.assertRaisesRegex(Exception, 'injected write failure'):
+            db.claim_account_live_check(2, run_id='not-committed')
+        self.assertEqual(db.get_account(2), before)
+
+    def test_single_account_plan_email_fallback_matches_previous_order(self):
+        self.assertTrue(db.claim_account_plan_check(email='EXPIRED@EXAMPLE.TEST', run_id='email'))
+        self.assertEqual(db.get_account(2)['plan_check_run_id'], 'email')
+        self.assertFalse(db.claim_account_plan_check(email='missing@example.invalid', run_id='none'))
+        # 历史 API 同时给 ID 和邮箱时按 ID 升序匹配首行，保留兼容行为。
+        self.assertTrue(db.update_account_plan_check(3, email='VALID@EXAMPLE.TEST', result={'ok': True, 'current_plan_type': 'plus'}))
+        self.assertEqual(db.get_account(1)['current_plan_type'], 'plus')
+        self.assertNotIn('current_plan_type', db.get_account(3))
 
     def test_expiry_boundaries_and_bad_tokens(self):
         self.assertFalse(service.token_needs_refresh(jwt({'exp': 101}), now=100))
