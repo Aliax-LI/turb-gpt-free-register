@@ -561,6 +561,7 @@ def run_registration(
             email_source=resolve_email_source(email),
             proxy_used=session.proxy or None,
             batch_dir=batch_dir,
+            session_info=session_info,
             extra={
                 "user": session_info.get("user"),
                 "account": session_info.get("account"),

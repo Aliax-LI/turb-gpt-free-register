@@ -2815,6 +2815,7 @@ def run_roxy_registration(
             proxy_used=((opened.raw or {}).get("proxy_pool_target") if opened else None) or proxy or None,
             exit_ip=exit_ip,
             batch_dir=batch_dir,
+            session_info=session_info,
             extra={
                 "registration_driver": "roxy_hybrid" if hybrid else "roxy",
                 "hybrid_entry_used": bool(hybrid_started),

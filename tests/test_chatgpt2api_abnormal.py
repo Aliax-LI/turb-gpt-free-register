@@ -35,6 +35,31 @@ class ChatGPT2ApiAbnormalTests(unittest.TestCase):
         self.assertEqual(result["unmatched_remote"], 1)
         self.assertEqual(chatgpt2api_sync._old_tokens(1), [_OLD_TOKEN])
 
+    def test_scan_matches_new_list_shape_by_account_id(self):
+        remote = [
+            {"id": "acct_old", "email": "a@test.com", "status_category": "abnormal", "status_label": "异常"},
+            {"id": "acct_live", "email": "b@test.com", "status_category": "normal", "status_label": "正常"},
+            {"id": "acct_orphan", "email": "missing@test.com", "status_category": "abnormal"},
+        ]
+        with patch.object(chatgpt2api_sync, "list_remote_accounts", return_value={"ok": True, "items": remote}), \
+             patch.object(chatgpt2api_sync.db, "get_account_by_email", side_effect=lambda e: {"id": 1, "email": e} if e == "a@test.com" else None):
+            result = chatgpt2api_sync.scan_abnormal_accounts()
+
+        self.assertEqual(result["abnormal_count"], 2)
+        self.assertEqual(result["account_ids"], [1])
+        self.assertEqual(chatgpt2api_sync._old_tokens(1), [])
+        self.assertEqual(chatgpt2api_sync._remote_ids(1), ["acct_old"])
+
+    def test_live_account_deletes_remote_id_when_token_is_hidden(self):
+        chatgpt2api_sync._remember_remote_ids(1, ["acct_old"])
+        with patch.object(chatgpt2api_sync, "sync_account", return_value={"ok": True, "status": "success"}), \
+             patch.object(chatgpt2api_sync, "delete_accounts", return_value={"ok": True, "status": "success"}) as delete:
+            out = chatgpt2api_sync.handle_live_check_finished(1, {"ok": True, "status": "live", "access_token": _NEW_TOKEN})
+
+        self.assertTrue(out["handled"])
+        delete.assert_called_once_with([], account_ids=["acct_old"])
+        self.assertEqual(chatgpt2api_sync._remote_ids(1), [])
+
     def test_live_account_imports_new_token_then_deletes_old(self):
         chatgpt2api_sync._remember_old_tokens(1, [_OLD_TOKEN])
         with patch.object(chatgpt2api_sync, "sync_account", return_value={"ok": True, "status": "success"}) as sync, \
@@ -42,9 +67,23 @@ class ChatGPT2ApiAbnormalTests(unittest.TestCase):
             out = chatgpt2api_sync.handle_live_check_finished(1, {"ok": True, "status": "live", "access_token": _NEW_TOKEN})
 
         self.assertTrue(out["handled"])
-        sync.assert_called_once_with(_NEW_TOKEN, force=True)
+        sync.assert_called_once_with(_NEW_TOKEN, refresh_token="", force=True)
         delete.assert_called_once_with([_OLD_TOKEN])
         self.assertEqual(chatgpt2api_sync._old_tokens(1), [])
+
+    def test_live_account_imports_session_refresh_token(self):
+        chatgpt2api_sync._remember_old_tokens(1, [_OLD_TOKEN])
+        with patch.object(chatgpt2api_sync, "sync_account", return_value={"ok": True, "status": "success"}) as sync, \
+             patch.object(chatgpt2api_sync, "delete_accounts", return_value={"ok": True, "status": "success"}):
+            out = chatgpt2api_sync.handle_live_check_finished(1, {
+                "ok": True,
+                "status": "live",
+                "access_token": _NEW_TOKEN,
+                "session": {"accessToken": _NEW_TOKEN, "refreshToken": "rt-1"},
+            })
+
+        self.assertTrue(out["handled"])
+        sync.assert_called_once_with(_NEW_TOKEN, refresh_token="rt-1", force=True)
 
     def test_deactivated_account_only_deletes(self):
         chatgpt2api_sync._remember_old_tokens(1, [_OLD_TOKEN])
@@ -89,7 +128,7 @@ class ChatGPT2ApiAbnormalTests(unittest.TestCase):
                 999, {"ok": True, "status": "live", "access_token": _NEW_TOKEN}, previous_token=_OLD_TOKEN
             )
         self.assertTrue(out["handled"])
-        sync.assert_called_once_with(_NEW_TOKEN, force=True)
+        sync.assert_called_once_with(_NEW_TOKEN, refresh_token="", force=True)
         delete.assert_called_once_with([_OLD_TOKEN])
 
     def test_delete_requires_bearer(self):

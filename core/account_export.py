@@ -663,6 +663,7 @@ def save_account_data(
     exit_ip: str | None = None,
     batch_dir: Path | None = None,
     auto_plan_check: bool | None = None,
+    session_info: dict | None = None,
 ) -> int:
     """
     将账号信息保存到 SQLite；output_path 仅为兼容旧调用方保留。
@@ -728,11 +729,21 @@ def save_account_data(
     logger.info("[Save] 账号及凭证已保存到 SQLite, id=%s, email=%s", row_id, email)
 
     try:
-        from core.chatgpt2api_sync import sync_account
+        from core.chatgpt2api_sync import _session_refresh_token, sync_account
 
-        sync_result = sync_account(access_token)
+        refresh_token = _session_refresh_token({"session": session_info or {}})
+        if not refresh_token:
+            logger.info(
+                "[ChatGPT2API] 注册 session 没有 refreshToken，本次只同步 AT，session keys=%s",
+                sorted(str(key) for key in (session_info or {})),
+            )
+        sync_result = sync_account(access_token, refresh_token=refresh_token)
         if sync_result.get("ok"):
-            logger.info("[ChatGPT2API] 已同步：id=%s, email=%s", row_id, email)
+            logger.info(
+                "[ChatGPT2API] 已同步：id=%s, email=%s, added=%s, synced=%s, RT=%s",
+                row_id, email, sync_result.get("added"), sync_result.get("synced"),
+                "有" if sync_result.get("has_refresh_token") else "无",
+            )
         elif sync_result.get("status") == "failed":
             logger.warning(
                 "[ChatGPT2API] 同步失败（不影响注册结果）：id=%s, email=%s, HTTP=%s, %s",

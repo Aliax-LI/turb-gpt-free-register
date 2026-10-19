@@ -89,7 +89,8 @@ def _sync_chatgpt2api(account_id: int, email: str, result: dict, previous_token:
     deleted = synced.get("deleted") or {}
     _append_log(
         email,
-        f"[ChatGPT2API] 导入新账号 {imported.get('status')}（{imported.get('message') or '-'}）；"
+        f"[ChatGPT2API] 导入新账号 {imported.get('status')}（{imported.get('message') or '-'}）"
+        f" RT={'有' if imported.get('has_refresh_token') else '无'}；"
         f"删除旧账号 {deleted.get('status')}（{deleted.get('message') or '-'}）",
     )
 
